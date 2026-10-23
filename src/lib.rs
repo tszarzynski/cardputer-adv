@@ -125,11 +125,25 @@ pub struct KeyboardPins {
 /// (or the line doesn't work): key presses are then late, not lost.
 const FALLBACK_POLL: Duration = Duration::from_secs(1);
 
+/// The pause after a wake-up with nothing to read. If the line is stuck low
+/// this turns a busy loop into slow polling, so other tasks keep running.
+const SPURIOUS_BACKOFF: Duration = Duration::from_millis(10);
+
 /// The keyboard: the TCA8418 driver and its interrupt line.
 pub struct Keyboard {
     keys: keys::Keyboard<I2c<'static, Blocking>>,
     interrupt: Input<'static>,
+    /// Events arrived while the last batch was being read: read again
+    /// without waiting.
+    pending: bool,
     missed: u32,
+}
+
+/// Why [`Keyboard::wait_inputs`] went to read the keyboard.
+enum Wake {
+    Interrupt,
+    Fallback,
+    Pending,
 }
 
 impl Keyboard {
@@ -144,18 +158,28 @@ impl Keyboard {
     /// If the TCA8418 can't be read over I2C.
     pub async fn wait_inputs(&mut self) -> Result<impl Iterator<Item = keys::KeyInput>, Error> {
         loop {
-            let woken = select(self.interrupt.wait_for_low(), Timer::after(FALLBACK_POLL)).await;
+            let wake = if core::mem::take(&mut self.pending) {
+                Wake::Pending
+            } else {
+                match select(self.interrupt.wait_for_low(), Timer::after(FALLBACK_POLL)).await {
+                    Either::First(()) => Wake::Interrupt,
+                    Either::Second(()) => Wake::Fallback,
+                }
+            };
             let events = self.keys.events().map_err(|_| Error::Keyboard)?;
-            // Clear the flag once the FIFO is empty; the TCA8418 raises it
-            // again if more events arrived meanwhile.
-            self.keys
-                .clear_keyboard_interrupt()
-                .map_err(|_| Error::Keyboard)?;
+            // Clear every flag (key events, overflow, …) so no source keeps
+            // the line low, then catch an event that landed in between.
+            self.keys.clear_interrupts().map_err(|_| Error::Keyboard)?;
+            self.pending = self.keys.events_available().map_err(|_| Error::Keyboard)?;
+
             let mut inputs = events.inputs().peekable();
             if inputs.peek().is_none() {
+                if matches!(wake, Wake::Interrupt) {
+                    Timer::after(SPURIOUS_BACKOFF).await;
+                }
                 continue;
             }
-            if matches!(woken, Either::Second(())) {
+            if matches!(wake, Wake::Fallback) {
                 // Events without an interrupt: the line isn't working.
                 self.missed = self.missed.saturating_add(1);
             }
@@ -200,6 +224,7 @@ pub fn keyboard(pins: KeyboardPins) -> Result<Keyboard, Error> {
     Ok(Keyboard {
         keys,
         interrupt,
+        pending: false,
         missed: 0,
     })
 }
