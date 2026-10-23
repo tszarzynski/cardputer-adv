@@ -3,7 +3,8 @@
 //! - [`display`]: the 1.14" ST7789V2 LCD as a 240×135 RGB565
 //!   embedded-graphics `DrawTarget` (landscape, keyboard below), backlight on.
 //! - [`keyboard`]: the 56-key keyboard (TCA8418 on I2C), with Shift/Fn layers
-//!   from [`cardputer_adv_keyboard`].
+//!   from [`cardputer_adv_keyboard`]. [`Keyboard::wait_inputs`] sleeps until
+//!   the TCA8418 signals a key event on its interrupt line.
 //!
 //! Pins (from the ADV schematic and working firmware):
 //!
@@ -17,13 +18,17 @@
 #![no_std]
 
 pub use cardputer_adv_keyboard as keys;
+use embassy_futures::select::{Either, select};
+use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
 use esp_hal::{
     Blocking,
     delay::Delay,
-    gpio::{Level, Output, OutputConfig},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
-    peripherals::{GPIO8, GPIO9, GPIO33, GPIO34, GPIO35, GPIO36, GPIO37, GPIO38, I2C0, SPI2},
+    peripherals::{
+        GPIO8, GPIO9, GPIO11, GPIO33, GPIO34, GPIO35, GPIO36, GPIO37, GPIO38, I2C0, SPI2,
+    },
     spi::{
         Mode,
         master::{Config as SpiConfig, Spi},
@@ -47,9 +52,6 @@ type DisplaySpi = ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, NoDel
 /// The LCD: an embedded-graphics `DrawTarget<Color = Rgb565>`.
 pub type Display =
     mipidsi::Display<SpiInterface<'static, DisplaySpi, Output<'static>>, ST7789, Output<'static>>;
-
-/// The keyboard on the board's I2C bus.
-pub type Keyboard = keys::Keyboard<I2c<'static, Blocking>>;
 
 /// The peripherals the LCD uses.
 pub struct DisplayPins {
@@ -115,10 +117,68 @@ pub struct KeyboardPins {
     pub i2c: I2C0<'static>,
     pub sda: GPIO8<'static>,
     pub scl: GPIO9<'static>,
+    /// The TCA8418's interrupt output (active low).
+    pub interrupt: GPIO11<'static>,
 }
 
-/// Initialises the keyboard. It takes the I2C bus for itself (the codec
-/// and IMU on the same bus are unused here).
+/// How often to look for key events anyway, in case an interrupt is missed
+/// (or the line doesn't work): key presses are then late, not lost.
+const FALLBACK_POLL: Duration = Duration::from_secs(1);
+
+/// The keyboard: the TCA8418 driver and its interrupt line.
+pub struct Keyboard {
+    keys: keys::Keyboard<I2c<'static, Blocking>>,
+    interrupt: Input<'static>,
+    missed: u32,
+}
+
+impl Keyboard {
+    /// Waits for key presses and returns them (with Shift/Fn applied).
+    ///
+    /// Sleeps until the TCA8418 pulls its interrupt line low, so an idle
+    /// keyboard costs nothing. It waits for the low *level*, not an edge:
+    /// events that arrive while the caller is busy keep the line low.
+    ///
+    /// # Errors
+    ///
+    /// If the TCA8418 can't be read over I2C.
+    pub async fn wait_inputs(&mut self) -> Result<impl Iterator<Item = keys::KeyInput>, Error> {
+        loop {
+            let woken = select(self.interrupt.wait_for_low(), Timer::after(FALLBACK_POLL)).await;
+            let events = self.keys.events().map_err(|_| Error::Keyboard)?;
+            // Clear the flag once the FIFO is empty; the TCA8418 raises it
+            // again if more events arrived meanwhile.
+            self.keys
+                .clear_keyboard_interrupt()
+                .map_err(|_| Error::Keyboard)?;
+            let mut inputs = events.inputs().peekable();
+            if inputs.peek().is_none() {
+                continue;
+            }
+            if matches!(woken, Either::Second(())) {
+                // Events without an interrupt: the line isn't working.
+                self.missed = self.missed.saturating_add(1);
+            }
+            return Ok(inputs);
+        }
+    }
+
+    /// How many times key events were found only by the fallback poll, which
+    /// points at a broken interrupt line.
+    #[must_use]
+    pub const fn missed_interrupts(&self) -> u32 {
+        self.missed
+    }
+
+    /// The underlying driver, for anything [`wait_inputs`](Self::wait_inputs)
+    /// doesn't cover.
+    pub const fn driver(&mut self) -> &mut keys::Keyboard<I2c<'static, Blocking>> {
+        &mut self.keys
+    }
+}
+
+/// Initialises the keyboard and its interrupt. It takes the I2C bus for
+/// itself (the codec and IMU on the same bus are unused here).
 ///
 /// # Errors
 ///
@@ -131,5 +191,15 @@ pub fn keyboard(pins: KeyboardPins) -> Result<Keyboard, Error> {
     .map_err(|_| Error::I2c)?
     .with_sda(pins.sda)
     .with_scl(pins.scl);
-    keys::Keyboard::new(i2c).map_err(|_| Error::Keyboard)
+    let mut keys = keys::Keyboard::new(i2c).map_err(|_| Error::Keyboard)?;
+    keys.enable_keyboard_interrupt()
+        .map_err(|_| Error::Keyboard)?;
+    keys.clear_interrupts().map_err(|_| Error::Keyboard)?;
+    // The TCA8418's INT is open-drain.
+    let interrupt = Input::new(pins.interrupt, InputConfig::default().with_pull(Pull::Up));
+    Ok(Keyboard {
+        keys,
+        interrupt,
+        missed: 0,
+    })
 }

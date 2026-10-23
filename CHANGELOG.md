@@ -6,4 +6,4 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-- First version.
+- First version: display, keyboard (interrupt-driven `wait_inputs`, with a fallback poll).

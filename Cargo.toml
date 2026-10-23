@@ -9,8 +9,19 @@ keywords = ["cardputer", "m5stack", "esp32s3", "esp-hal", "no-std"]
 categories = ["embedded", "hardware-support", "no-std"]
 readme = "README.md"
 
+# Built by the firmware workspace (it needs esp-hal), so it can't inherit the
+# root workspace's lints; these are the same.
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+[lints.rust]
+unsafe_code = "forbid"
+
 [dependencies]
 cardputer-adv-keyboard = "0.2.6"
+embassy-futures = "0.1.2"
+embassy-time = "0.5.1"
 embedded-graphics-core = "0.4"
 embedded-hal-bus = "0.3"
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "unstable"] }

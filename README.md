@@ -4,15 +4,22 @@ Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/C
 
 - `display(DisplayPins)` sets up the 1.14" ST7789V2 LCD and turns the backlight on. You get it back as a 240×135 RGB565 [embedded-graphics](https://docs.rs/embedded-graphics) `DrawTarget`, in landscape with the keyboard below.
 - `keyboard(KeyboardPins)` sets up the 56-key TCA8418 keyboard on I2C, with Shift and Fn layers from [cardputer-adv-keyboard](https://crates.io/crates/cardputer-adv-keyboard). Fn + `;` `.` `,` `/` gives the arrow keys.
+- `Keyboard::wait_inputs().await` sleeps until the TCA8418 pulls its interrupt line (GPIO11) low, then returns the keys pressed.
+  - It waits for the low level, not an edge, so events that arrive while you're busy aren't lost.
+  - A 1 s fallback poll covers a missed interrupt; `missed_interrupts()` counts how often that poll was needed.
 
 ```rust
 let (mut display, _backlight) = cardputer_adv::display(DisplayPins {
     spi: p.SPI2, sck: p.GPIO36, mosi: p.GPIO35, cs: p.GPIO37,
     dc: p.GPIO34, reset: p.GPIO33, backlight: p.GPIO38,
 })?;
-let mut keyboard = cardputer_adv::keyboard(KeyboardPins { i2c: p.I2C0, sda: p.GPIO8, scl: p.GPIO9 })?;
+let mut keyboard = cardputer_adv::keyboard(KeyboardPins {
+    i2c: p.I2C0, sda: p.GPIO8, scl: p.GPIO9, interrupt: p.GPIO11,
+})?;
 display.clear(Rgb565::BLACK)?;
-for key in keyboard.inputs()? { /* … */ }
+loop {
+    for key in keyboard.wait_inputs().await? { /* … */ }
+}
 ```
 
 ## Pins
@@ -28,7 +35,7 @@ The keyboard currently takes the I2C bus for itself. The codec and IMU on the sa
 
 ## Status
 
-The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). This crate itself hasn't been run on hardware yet.
+The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). This crate itself hasn't been run on hardware yet, so the interrupt line in particular is unconfirmed. If it doesn't work, keys still arrive through the fallback poll, and `missed_interrupts()` will show it.
 
 ## Licence
 
