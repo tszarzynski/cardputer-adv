@@ -1,0 +1,18 @@
+[package]
+name = "cardputer-adv"
+version = "0.1.0"
+description = "Board support for the M5Stack Cardputer ADV (ESP32-S3) on esp-hal: display, keyboard and backlight"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+keywords = ["cardputer", "m5stack", "esp32s3", "esp-hal", "no-std"]
+categories = ["embedded", "hardware-support", "no-std"]
+readme = "README.md"
+
+[dependencies]
+cardputer-adv-keyboard = "0.2.6"
+embedded-graphics-core = "0.4"
+embedded-hal-bus = "0.3"
+esp-hal = { version = "~1.2.2", features = ["esp32s3", "unstable"] }
+mipidsi = "0.10"
+static_cell = "2.1.1"
