@@ -1,7 +1,8 @@
 //! Board support for the M5Stack Cardputer ADV on esp-hal.
 //!
 //! - [`display`]: the 1.14" ST7789V2 LCD as a 240×135 RGB565
-//!   embedded-graphics `DrawTarget` (landscape, keyboard below), backlight on.
+//!   embedded-graphics `DrawTarget` (landscape, keyboard below), and its
+//!   [`Backlight`], dimmable by PWM.
 //! - [`keyboard`]: the 56-key keyboard (TCA8418 on I2C), with Shift/Fn layers
 //!   from [`cardputer_adv_keyboard`]. [`Keyboard::wait_inputs`] sleeps until
 //!   the TCA8418 signals a key event on its interrupt line.
@@ -13,7 +14,7 @@
 //! | Function | GPIO |
 //! |---|---|
 //! | LCD SCK / MOSI / CS / DC / RST | 36 / 35 / 37 / 34 / 33 |
-//! | LCD backlight (also powers the RGB LED) | 38 |
+//! | LCD backlight, PWM on LEDC (also powers the RGB LED) | 38 |
 //! | I2C SDA / SCL (keyboard, ES8311, BMI270) | 8 / 9 |
 //! | Keyboard interrupt | 11 |
 //! | Battery voltage (ADC1, through a 2:1 divider) | 10 |
@@ -28,11 +29,16 @@ use esp_hal::{
     Blocking,
     delay::Delay,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation},
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{DriveMode, Input, InputConfig, Level, Output, OutputConfig, Pull},
+    ledc::{
+        LSGlobalClkSource, Ledc, LowSpeed,
+        channel::{self, ChannelIFace},
+        timer::{self, TimerIFace},
+    },
     i2c::master::{Config as I2cConfig, I2c},
     peripherals::{
         ADC1, GPIO8, GPIO9, GPIO10, GPIO11, GPIO33, GPIO34, GPIO35, GPIO36, GPIO37, GPIO38,
-        I2C0, SPI2,
+        I2C0, LEDC, SPI2,
     },
     spi::{
         Mode,
@@ -67,6 +73,8 @@ pub struct DisplayPins {
     pub dc: GPIO34<'static>,
     pub reset: GPIO33<'static>,
     pub backlight: GPIO38<'static>,
+    /// Drives the backlight with PWM, for dimming.
+    pub ledc: LEDC<'static>,
 }
 
 #[derive(Debug)]
@@ -75,11 +83,60 @@ pub enum Error {
     I2c,
     DisplayInit,
     Keyboard,
+    Backlight,
 }
 
-/// Initialises the LCD (landscape, cleared to black by the caller) and turns
-/// the backlight on. Keep the returned backlight pin alive; dropping it turns
-/// the backlight off.
+/// The LCD backlight, dimmable: PWM at 24 kHz (inaudible, no visible
+/// flicker) from LEDC low-speed channel 0. GPIO38 also powers the RGB LED,
+/// which dims with it.
+pub struct Backlight {
+    channel: channel::Channel<'static, LowSpeed>,
+}
+
+impl Backlight {
+    /// Sets the brightness, 0 (off) to 100 (full).
+    ///
+    /// # Errors
+    ///
+    /// If LEDC rejects the duty (it can't, for 0–100).
+    pub fn set_percent(&mut self, percent: u8) -> Result<(), Error> {
+        self.channel
+            .set_duty(percent.min(100))
+            .map_err(|_| Error::Backlight)
+    }
+}
+
+/// Starts the backlight at full brightness.
+///
+/// # Panics
+///
+/// If called twice (the PWM timer is a `static`).
+fn backlight(ledc: LEDC<'static>, pin: GPIO38<'static>) -> Result<Backlight, Error> {
+    static TIMER: StaticCell<esp_hal::ledc::timer::Timer<'static, LowSpeed>> = StaticCell::new();
+
+    let mut ledc = Ledc::new(ledc);
+    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+    let timer = TIMER.init(ledc.timer::<LowSpeed>(timer::Number::Timer0));
+    timer
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty8Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(24),
+        })
+        .map_err(|_| Error::Backlight)?;
+    let mut channel = ledc.channel(channel::Number::Channel0, pin);
+    channel
+        .configure(channel::config::Config {
+            timer,
+            duty_pct: 100,
+            drive_mode: DriveMode::PushPull,
+        })
+        .map_err(|_| Error::Backlight)?;
+    Ok(Backlight { channel })
+}
+
+/// Initialises the LCD (landscape, cleared by the caller) and turns the
+/// backlight on at full brightness.
 ///
 /// # Errors
 ///
@@ -87,11 +144,11 @@ pub enum Error {
 ///
 /// # Panics
 ///
-/// If called twice (the SPI transfer buffer is a `static`).
-pub fn display(pins: DisplayPins) -> Result<(Display, Output<'static>), Error> {
+/// If called twice (the SPI transfer buffer and the PWM timer are `static`).
+pub fn display(pins: DisplayPins) -> Result<(Display, Backlight), Error> {
     static BUFFER: StaticCell<[u8; 512]> = StaticCell::new();
 
-    let backlight = Output::new(pins.backlight, Level::High, OutputConfig::default());
+    let backlight = backlight(pins.ledc, pins.backlight)?;
     let dc = Output::new(pins.dc, Level::Low, OutputConfig::default());
     let reset = Output::new(pins.reset, Level::High, OutputConfig::default());
     let cs = Output::new(pins.cs, Level::High, OutputConfig::default());
