@@ -129,6 +129,10 @@ const FALLBACK_POLL: Duration = Duration::from_secs(1);
 /// this turns a busy loop into slow polling, so other tasks keep running.
 const SPURIOUS_BACKOFF: Duration = Duration::from_millis(10);
 
+/// The most key inputs one read returns (the TCA8418's FIFO holds 10
+/// events).
+const MAX_INPUTS: usize = 10;
+
 /// The keyboard: the TCA8418 driver and its interrupt line.
 pub struct Keyboard {
     keys: keys::Keyboard<I2c<'static, Blocking>>,
@@ -168,12 +172,23 @@ impl Keyboard {
             };
             let events = self.keys.events().map_err(|_| Error::Keyboard)?;
             // Clear every flag (key events, overflow, …) so no source keeps
-            // the line low, then catch an event that landed in between.
-            self.keys.clear_interrupts().map_err(|_| Error::Keyboard)?;
-            self.pending = self.keys.events_available().map_err(|_| Error::Keyboard)?;
+            // the line low, then catch an event that landed in between. The
+            // keys are already read, so a failure here mustn't lose them:
+            // read again on the next call instead.
+            let cleared = self.keys.clear_interrupts().is_ok();
+            self.pending = !cleared || self.keys.events_available().unwrap_or(true);
 
-            let mut inputs = events.inputs().peekable();
-            if inputs.peek().is_none() {
+            let mut any_event = false;
+            let mut inputs = [None; MAX_INPUTS];
+            for (slot, input) in inputs.iter_mut().zip(events.filter_map(|event| {
+                any_event = true;
+                event.input
+            })) {
+                *slot = Some(input);
+            }
+            if !any_event {
+                // Woken with nothing to read: back off, so a line stuck low
+                // can't keep this task from yielding.
                 if matches!(wake, Wake::Interrupt) {
                     Timer::after(SPURIOUS_BACKOFF).await;
                 }
@@ -183,7 +198,11 @@ impl Keyboard {
                 // Events without an interrupt: the line isn't working.
                 self.missed = self.missed.saturating_add(1);
             }
-            return Ok(inputs);
+            // Releases (and lone modifiers) are events without an input.
+            if inputs[0].is_none() {
+                continue;
+            }
+            return Ok(inputs.into_iter().flatten());
         }
     }
 
