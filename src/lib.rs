@@ -5,6 +5,8 @@
 //! - [`keyboard`]: the 56-key keyboard (TCA8418 on I2C), with Shift/Fn layers
 //!   from [`cardputer_adv_keyboard`]. [`Keyboard::wait_inputs`] sleeps until
 //!   the TCA8418 signals a key event on its interrupt line.
+//! - [`battery`]: the battery voltage. The board can't tell whether it's
+//!   charging.
 //!
 //! Pins (from the ADV schematic and working firmware):
 //!
@@ -14,6 +16,7 @@
 //! | LCD backlight (also powers the RGB LED) | 38 |
 //! | I2C SDA / SCL (keyboard, ES8311, BMI270) | 8 / 9 |
 //! | Keyboard interrupt | 11 |
+//! | Battery voltage (ADC1, through a 2:1 divider) | 10 |
 
 #![no_std]
 
@@ -24,10 +27,12 @@ use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
 use esp_hal::{
     Blocking,
     delay::Delay,
+    analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation},
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     peripherals::{
-        GPIO8, GPIO9, GPIO11, GPIO33, GPIO34, GPIO35, GPIO36, GPIO37, GPIO38, I2C0, SPI2,
+        ADC1, GPIO8, GPIO9, GPIO10, GPIO11, GPIO33, GPIO34, GPIO35, GPIO36, GPIO37, GPIO38,
+        I2C0, SPI2,
     },
     spi::{
         Mode,
@@ -246,4 +251,49 @@ pub fn keyboard(pins: KeyboardPins) -> Result<Keyboard, Error> {
         pending: false,
         missed: 0,
     })
+}
+
+/// The peripherals the battery measurement uses.
+pub struct BatteryPins {
+    pub adc: ADC1<'static>,
+    /// The battery, through the board's 2:1 divider.
+    pub pin: GPIO10<'static>,
+}
+
+/// How many readings [`Battery::millivolts`] averages.
+const BATTERY_SAMPLES: u32 = 16;
+
+/// The battery voltage, measured as M5Stack's M5Unified does for the
+/// Cardputer and Cardputer ADV: GPIO10 on ADC1, through a 2:1 divider.
+pub struct Battery {
+    adc: Adc<'static, ADC1<'static>, Blocking>,
+    pin: AdcPin<GPIO10<'static>, ADC1<'static>, AdcCalCurve<ADC1<'static>>>,
+}
+
+impl Battery {
+    /// The battery voltage in millivolts, averaged over a few readings.
+    ///
+    /// The board can't tell whether it's charging: on USB with the power
+    /// switch on, this is the charging voltage, close to full.
+    pub fn millivolts(&mut self) -> u16 {
+        let sum: u32 = (0..BATTERY_SAMPLES)
+            .map(|_| u32::from(self.adc.read_blocking(&mut self.pin)))
+            .sum();
+        u16::try_from(sum / BATTERY_SAMPLES * 2).unwrap_or(u16::MAX)
+    }
+}
+
+/// Sets up the battery measurement: ADC1 with the chip's calibration curve,
+/// at 11 dB attenuation (up to about 3.1 V at the pin, 6.2 V at the battery).
+#[must_use]
+pub fn battery(pins: BatteryPins) -> Battery {
+    let mut config = AdcConfig::new();
+    let pin = config.enable_pin_with_cal::<_, AdcCalCurve<ADC1<'static>>>(
+        pins.pin,
+        Attenuation::_11dB,
+    );
+    Battery {
+        adc: Adc::new(pins.adc, config),
+        pin,
+    }
 }

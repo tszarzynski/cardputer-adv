@@ -7,6 +7,7 @@ Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/C
 - `Keyboard::wait_inputs().await` sleeps until the TCA8418 pulls its interrupt line (GPIO11) low, then returns the keys pressed.
   - It waits for the low level, not an edge, so events that arrive while you're busy aren't lost.
   - A 1 s fallback poll covers a missed interrupt; `missed_interrupts()` counts how often that poll was needed.
+- `battery(BatteryPins)` measures the battery voltage (`Battery::millivolts()`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does. The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
 
 ```rust
 let (mut display, _backlight) = cardputer_adv::display(DisplayPins {
@@ -28,6 +29,7 @@ loop {
 |---|---|
 | LCD SCK / MOSI / CS / DC / RST | 36 / 35 / 37 / 34 / 33 |
 | LCD backlight (also powers the RGB LED) | 38 |
+| Battery voltage (ADC1, 2:1 divider) | 10 |
 | I2C SDA / SCL (keyboard, ES8311 codec, BMI270 IMU) | 8 / 9 |
 | Keyboard interrupt | 11 |
 
@@ -35,7 +37,7 @@ The keyboard currently takes the I2C bus for itself. The codec and IMU on the sa
 
 ## Status
 
-The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). This crate itself hasn't been run on hardware yet, so the interrupt line in particular is unconfirmed. If it doesn't work, keys still arrive through the fallback poll, and `missed_interrupts()` will show it.
+The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). The display and the keyboard, including its interrupt line, work on a Cardputer ADV (tested October 2026). The battery reading is new and not yet checked against a multimeter.
 
 ## Licence
 
