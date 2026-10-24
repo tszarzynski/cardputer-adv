@@ -86,9 +86,10 @@ pub enum Error {
     Backlight,
 }
 
-/// The LCD backlight, dimmable: PWM at 24 kHz (inaudible, no visible
-/// flicker) from LEDC low-speed channel 0. GPIO38 also powers the RGB LED,
-/// which dims with it.
+/// The LCD backlight, dimmable: PWM at 256 Hz from LEDC low-speed channel
+/// 0, as M5Stack's M5GFX drives it on the Cardputer. Its LED driver can't
+/// follow fast PWM: at 24 kHz, 15% duty looked off. GPIO38 also powers the
+/// RGB LED, which dims with it.
 pub struct Backlight {
     channel: channel::Channel<'static, LowSpeed>,
 }
@@ -119,9 +120,10 @@ fn backlight(ledc: LEDC<'static>, pin: GPIO38<'static>) -> Result<Backlight, Err
     let timer = TIMER.init(ledc.timer::<LowSpeed>(timer::Number::Timer0));
     timer
         .configure(timer::config::Config {
-            duty: timer::config::Duty::Duty8Bit,
+            // 80 MHz / (256 Hz × 1024 steps): a divider LEDC can do.
+            duty: timer::config::Duty::Duty10Bit,
             clock_source: timer::LSClockSource::APBClk,
-            frequency: Rate::from_khz(24),
+            frequency: Rate::from_hz(256),
         })
         .map_err(|_| Error::Backlight)?;
     let mut channel = ledc.channel(channel::Number::Channel0, pin);
