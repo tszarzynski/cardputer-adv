@@ -12,4 +12,5 @@ follows [Semantic Versioning](https://semver.org/).
 - The speaker: an I2S DMA stream (`speaker`, `Speaker::run`), the ES8311 codec's DAC path (`enable_codec`) and its level (`set_volume`). The stream restarts on silence if it runs dry.
 - A framebuffer sent by DMA (`frame_display`, `Frame`, `FrameDisplay::flush`), sending only the pixels that changed.
 - The I2C bus is a critical-section mutex rather than a `RefCell`, so its devices can be used from any executor or core.
+- `keyboard_on` (and `keyboard`) retry setting up the TCA8418, which can miss the first transfers right after a flash or a reset.
 - `Error` documents its variants and implements `Display` and `core::error::Error`; it's `#[non_exhaustive]`.

@@ -760,16 +760,35 @@ pub fn keyboard(pins: KeyboardPins) -> Result<Keyboard, Error> {
     keyboard_on(bus, pins.interrupt)
 }
 
+/// Tries at setting up the TCA8418: right after a flash or a reset it can
+/// miss the first transfers.
+const KEYBOARD_TRIES: u32 = 5;
+/// The wait between those tries.
+const KEYBOARD_RETRY_MS: u32 = 20;
+
 /// Initialises the keyboard on the shared bus, and its interrupt.
 ///
 /// # Errors
 ///
-/// If the TCA8418 can't be set up.
+/// If the TCA8418 can't be set up, after [`KEYBOARD_TRIES`] tries.
 pub fn keyboard_on(bus: &'static I2cBus, interrupt: GPIO11<'static>) -> Result<Keyboard, Error> {
-    let mut keys = keys::Keyboard::new(CriticalSectionDevice::new(bus)).map_err(|_| Error::Keyboard)?;
-    keys.enable_keyboard_interrupt()
-        .map_err(|_| Error::Keyboard)?;
-    keys.clear_interrupts().map_err(|_| Error::Keyboard)?;
+    let set_up = || -> Result<keys::Keyboard<I2cDevice>, Error> {
+        let mut keys =
+            keys::Keyboard::new(CriticalSectionDevice::new(bus)).map_err(|_| Error::Keyboard)?;
+        keys.enable_keyboard_interrupt()
+            .map_err(|_| Error::Keyboard)?;
+        keys.clear_interrupts().map_err(|_| Error::Keyboard)?;
+        Ok(keys)
+    };
+    let mut keys = set_up();
+    for _ in 1..KEYBOARD_TRIES {
+        if keys.is_ok() {
+            break;
+        }
+        Delay::new().delay_millis(KEYBOARD_RETRY_MS);
+        keys = set_up();
+    }
+    let keys = keys?;
     // The TCA8418's INT is open-drain.
     let interrupt = Input::new(interrupt, InputConfig::default().with_pull(Pull::Up));
     Ok(Keyboard {
