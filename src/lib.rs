@@ -6,6 +6,11 @@
 //! - [`keyboard`]: the 56-key keyboard (TCA8418 on I2C), with Shift/Fn layers
 //!   from [`cardputer_adv_keyboard`]. [`Keyboard::wait_inputs`] sleeps until
 //!   the TCA8418 signals a key event on its interrupt line.
+//! - [`imu`]: the BMI270 motion sensor's accelerometer, in milli-g.
+//! - [`speaker`]: the speaker, fed with samples over I2S (the ES8311 codec,
+//!   then an NS4150B amplifier); [`enable_codec`] turns its DAC path on.
+//! - [`i2c`]: the I2C bus the keyboard and the motion sensor share. Only
+//!   needed to use both; [`keyboard`] alone sets it up itself.
 //! - [`battery`]: the battery voltage. The board can't tell whether it's
 //!   charging.
 //!
@@ -18,15 +23,21 @@
 //! | I2C SDA / SCL (keyboard, ES8311, BMI270) | 8 / 9 |
 //! | Keyboard interrupt | 11 |
 //! | Battery voltage (ADC1, through a 2:1 divider) | 10 |
+//! | I2S BCLK / WS / DOUT (to the ES8311; no MCLK) | 41 / 43 / 42 |
 
 #![no_std]
+
+use core::cell::RefCell;
 
 pub use cardputer_adv_keyboard as keys;
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
-use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
+use embedded_hal_bus::{
+    i2c::RefCellDevice,
+    spi::{ExclusiveDevice, NoDelay},
+};
 use esp_hal::{
-    Blocking,
+    Async, Blocking,
     delay::Delay,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation},
     gpio::{DriveMode, Input, InputConfig, Level, Output, OutputConfig, Pull},
@@ -35,10 +46,13 @@ use esp_hal::{
         channel::{self, ChannelIFace},
         timer::{self, TimerIFace},
     },
+    dma::DmaTxStreamBuf,
+    dma_tx_stream_buffer,
     i2c::master::{Config as I2cConfig, I2c},
+    i2s::master::{Channels, DataFormat, I2s, I2sTxDmaTransfer, TdmConfig},
     peripherals::{
-        ADC1, GPIO8, GPIO9, GPIO10, GPIO11, GPIO33, GPIO34, GPIO35, GPIO36, GPIO37, GPIO38,
-        I2C0, LEDC, SPI2,
+        ADC1, DMA_CH0, GPIO8, GPIO9, GPIO10, GPIO11, GPIO33, GPIO34, GPIO35, GPIO36, GPIO37,
+        GPIO38, GPIO41, GPIO42, GPIO43, I2C0, I2S0, LEDC, SPI2,
     },
     spi::{
         Mode,
@@ -84,6 +98,12 @@ pub enum Error {
     DisplayInit,
     Keyboard,
     Backlight,
+    /// The motion sensor wasn't found, or didn't start.
+    Imu,
+    /// The I2S output didn't start, or ran dry.
+    Speaker,
+    /// The ES8311 codec didn't answer.
+    Codec,
 }
 
 /// The LCD backlight, dimmable: PWM at 256 Hz from LEDC low-speed channel
@@ -176,6 +196,42 @@ pub fn display(pins: DisplayPins) -> Result<(Display, Backlight), Error> {
     Ok((display, backlight))
 }
 
+/// The I2C bus: the keyboard, the ES8311 codec and the BMI270 share it.
+pub type I2cBus = RefCell<I2c<'static, Blocking>>;
+
+/// One device's handle on the shared [`I2cBus`].
+pub type I2cDevice = RefCellDevice<'static, I2c<'static, Blocking>>;
+
+/// The peripherals the I2C bus uses.
+pub struct I2cPins {
+    pub i2c: I2C0<'static>,
+    pub sda: GPIO8<'static>,
+    pub scl: GPIO9<'static>,
+}
+
+/// Sets up the shared I2C bus (400 kHz). Its devices borrow it only for
+/// each transfer, never across an `.await`, so they can be used from one
+/// executor's tasks.
+///
+/// # Errors
+///
+/// If the bus can't be configured.
+///
+/// # Panics
+///
+/// If called twice (there is one bus).
+pub fn i2c(pins: I2cPins) -> Result<&'static I2cBus, Error> {
+    static BUS: StaticCell<I2cBus> = StaticCell::new();
+    let i2c = I2c::new(
+        pins.i2c,
+        I2cConfig::default().with_frequency(Rate::from_khz(400)),
+    )
+    .map_err(|_| Error::I2c)?
+    .with_sda(pins.sda)
+    .with_scl(pins.scl);
+    Ok(BUS.init(RefCell::new(i2c)))
+}
+
 /// The peripherals the keyboard uses.
 pub struct KeyboardPins {
     pub i2c: I2C0<'static>,
@@ -199,7 +255,7 @@ const MAX_INPUTS: usize = 10;
 
 /// The keyboard: the TCA8418 driver and its interrupt line.
 pub struct Keyboard {
-    keys: keys::Keyboard<I2c<'static, Blocking>>,
+    keys: keys::Keyboard<I2cDevice>,
     interrupt: Input<'static>,
     /// Events arrived while the last batch was being read: read again
     /// without waiting.
@@ -279,37 +335,242 @@ impl Keyboard {
 
     /// The underlying driver, for anything [`wait_inputs`](Self::wait_inputs)
     /// doesn't cover.
-    pub const fn driver(&mut self) -> &mut keys::Keyboard<I2c<'static, Blocking>> {
+    pub const fn driver(&mut self) -> &mut keys::Keyboard<I2cDevice> {
         &mut self.keys
     }
 }
 
-/// Initialises the keyboard and its interrupt. It takes the I2C bus for
-/// itself (the codec and IMU on the same bus are unused here).
+/// Initialises the I2C bus, the keyboard and its interrupt. To use the
+/// motion sensor too, set the bus up with [`i2c`] and use
+/// [`keyboard_on`] instead.
 ///
 /// # Errors
 ///
 /// If the bus or the TCA8418 can't be set up.
+///
+/// # Panics
+///
+/// If the bus was already set up (by an earlier call, or [`i2c`]).
 pub fn keyboard(pins: KeyboardPins) -> Result<Keyboard, Error> {
-    let i2c = I2c::new(
-        pins.i2c,
-        I2cConfig::default().with_frequency(Rate::from_khz(400)),
-    )
-    .map_err(|_| Error::I2c)?
-    .with_sda(pins.sda)
-    .with_scl(pins.scl);
-    let mut keys = keys::Keyboard::new(i2c).map_err(|_| Error::Keyboard)?;
+    let bus = i2c(I2cPins {
+        i2c: pins.i2c,
+        sda: pins.sda,
+        scl: pins.scl,
+    })?;
+    keyboard_on(bus, pins.interrupt)
+}
+
+/// Initialises the keyboard on the shared bus, and its interrupt.
+///
+/// # Errors
+///
+/// If the TCA8418 can't be set up.
+pub fn keyboard_on(bus: &'static I2cBus, interrupt: GPIO11<'static>) -> Result<Keyboard, Error> {
+    let mut keys = keys::Keyboard::new(RefCellDevice::new(bus)).map_err(|_| Error::Keyboard)?;
     keys.enable_keyboard_interrupt()
         .map_err(|_| Error::Keyboard)?;
     keys.clear_interrupts().map_err(|_| Error::Keyboard)?;
     // The TCA8418's INT is open-drain.
-    let interrupt = Input::new(pins.interrupt, InputConfig::default().with_pull(Pull::Up));
+    let interrupt = Input::new(interrupt, InputConfig::default().with_pull(Pull::Up));
     Ok(Keyboard {
         keys,
         interrupt,
         pending: false,
         missed: 0,
     })
+}
+
+/// The largest I2C write while uploading the BMI270's configuration.
+const IMU_BURST: u16 = 128;
+
+/// The BMI270 driver on the shared bus.
+type Bmi270 = bmi2::Bmi2<bmi2::interface::I2cInterface<I2cDevice>, Delay, { IMU_BURST as usize }>;
+
+/// The BMI270's accelerometer: ±8 g at 100 Hz (its gyroscope stays off).
+pub struct Imu {
+    bmi: Bmi270,
+}
+
+impl Imu {
+    /// The acceleration now, in milli-g, as (x, y, z) in the sensor's axes.
+    /// At rest it is about 1000 mg in total: gravity.
+    ///
+    /// # Errors
+    ///
+    /// If the sensor can't be read.
+    pub fn acceleration(&mut self) -> Result<[i32; 3], Error> {
+        let data = self.bmi.get_acc_data().map_err(|_| Error::Imu)?;
+        // ±8 g over the i16 range: 4096 counts per g.
+        let mg = |raw: i16| i32::from(raw) * 1000 / 4096;
+        Ok([mg(data.x), mg(data.y), mg(data.z)])
+    }
+}
+
+/// Starts the BMI270 on the shared bus: finds it at either of its addresses,
+/// uploads its configuration (8 kB, about 50 ms) and turns the accelerometer
+/// on.
+///
+/// # Errors
+///
+/// If no BMI270 answers, or it doesn't start.
+pub fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
+    use bmi2::{
+        I2cAddr, config,
+        types::{AccBwp, AccConf, AccRange, Burst, Odr, PerfMode, PwrCtrl},
+    };
+    let mut found = None;
+    for address in [I2cAddr::Default, I2cAddr::Alternative] {
+        let mut bmi = Bmi270::new_i2c(
+            RefCellDevice::new(bus),
+            Delay::new(),
+            address,
+            Burst::new(IMU_BURST),
+        );
+        if bmi.get_chip_id().is_ok_and(|id| id == 0x24) {
+            found = Some(bmi);
+            break;
+        }
+    }
+    let mut bmi = found.ok_or(Error::Imu)?;
+    bmi.init(&config::BMI270_CONFIG_FILE)
+        .map_err(|_| Error::Imu)?;
+    bmi.set_acc_range(AccRange::Range8g).map_err(|_| Error::Imu)?;
+    bmi.set_acc_conf(AccConf {
+        odr: Odr::Odr100,
+        bwp: AccBwp::NormAvg4,
+        filter_perf: PerfMode::Perf,
+    })
+    .map_err(|_| Error::Imu)?;
+    bmi.set_pwr_ctrl(PwrCtrl {
+        aux_en: false,
+        gyr_en: false,
+        acc_en: true,
+        temp_en: false,
+    })
+    .map_err(|_| Error::Imu)?;
+    Ok(Imu { bmi })
+}
+
+/// The speaker's sample rate.
+pub const SAMPLE_RATE: u32 = 44_100;
+
+/// The DMA buffer: 4096 bytes is 1024 stereo frames, 23 ms, in 8 chunks.
+/// Samples are pushed at most that far ahead of being heard.
+const SPEAKER_BUFFER: usize = 4096;
+const SPEAKER_CHUNK: usize = 512;
+
+/// The peripherals the speaker uses.
+pub struct SpeakerPins {
+    pub i2s: I2S0<'static>,
+    pub dma: DMA_CH0<'static>,
+    pub bclk: GPIO41<'static>,
+    pub ws: GPIO43<'static>,
+    pub dout: GPIO42<'static>,
+}
+
+/// The speaker: an I2S stream to the ES8311 codec, playing silence until
+/// [`run`](Self::run) feeds it.
+pub struct Speaker {
+    transfer: I2sTxDmaTransfer<'static, Async, DmaTxStreamBuf>,
+}
+
+impl Speaker {
+    /// Plays the mono samples `fill` writes, at [`SAMPLE_RATE`], forever.
+    /// `fill` is asked for as many as the buffer has room for, every few
+    /// milliseconds; it must keep up, so run this on a high-priority
+    /// executor (such as an `InterruptExecutor`) if other tasks hold the CPU
+    /// for long.
+    ///
+    /// Returns only if the stream stops: when `fill` didn't keep up and the
+    /// buffer ran dry.
+    pub async fn run(mut self, mut fill: impl FnMut(&mut [i16])) -> Error {
+        let mut mono = [0i16; 256];
+        loop {
+            if self.transfer.wait_for_available_async().await.is_err() {
+                return Error::Speaker;
+            }
+            loop {
+                let pushed = self.transfer.push_with(|bytes| {
+                    // Stereo frames, the same sample left and right.
+                    let frames = (bytes.len() / 4).min(mono.len());
+                    fill(&mut mono[..frames]);
+                    for (frame, sample) in bytes.chunks_exact_mut(4).zip(&mono[..frames]) {
+                        let [lo, hi] = sample.to_le_bytes();
+                        frame.copy_from_slice(&[lo, hi, lo, hi]);
+                    }
+                    frames * 4
+                });
+                if pushed == 0 {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Starts the I2S stream to the codec (16-bit stereo at [`SAMPLE_RATE`]),
+/// playing silence. The codec takes its clock from it, so call
+/// [`enable_codec`] once this is running.
+///
+/// # Errors
+///
+/// If the I2S peripheral or its DMA can't be set up.
+///
+/// # Panics
+///
+/// If called twice (its DMA buffer is static).
+pub fn speaker(pins: SpeakerPins) -> Result<Speaker, Error> {
+    let i2s = I2s::new(
+        pins.i2s,
+        pins.dma,
+        TdmConfig::new_tdm_philips()
+            .with_sample_rate(Rate::from_hz(SAMPLE_RATE))
+            .with_data_format(DataFormat::Data16Channel16)
+            .with_channels(Channels::STEREO),
+    )
+    .map_err(|_| Error::Speaker)?
+    .into_async();
+    let tx = i2s
+        .i2s_tx
+        .with_bclk(pins.bclk)
+        .with_ws(pins.ws)
+        .with_dout(pins.dout)
+        .build();
+    let mut buffer = dma_tx_stream_buffer!(SPEAKER_BUFFER, SPEAKER_CHUNK);
+    // Start full of silence.
+    while buffer.push(&[0; 64]) > 0 {}
+    let transfer = tx.write(buffer).map_err(|_| Error::Speaker)?;
+    Ok(Speaker { transfer })
+}
+
+/// The ES8311's I2C address.
+const ES8311: u8 = 0x18;
+
+/// Turns on the ES8311's DAC path to the amplifier, at 0 dB. Its master
+/// clock comes from the I2S bit clock (the board has no MCLK line), so the
+/// [`speaker`] stream must be running. The sequence is M5Unified's Cardputer
+/// ADV speaker enable, as espp's driver uses it.
+///
+/// # Errors
+///
+/// If the codec doesn't answer.
+pub fn enable_codec(bus: &'static I2cBus) -> Result<(), Error> {
+    use embedded_hal::i2c::I2c as _;
+    const INIT: [[u8; 2]; 8] = [
+        [0x00, 0x80], // reset: power on, state machine enabled
+        [0x01, 0xB5], // clock manager: MCLK from BCLK, DAC clocks on
+        [0x02, 0x18], // clock manager: MCLK = BCLK × 8 (256 fs at 32 bits a frame)
+        [0x0D, 0x01], // system: analog circuits on
+        [0x12, 0x00], // system: DAC on
+        [0x13, 0x10], // system: output to the amplifier on
+        [0x32, 0xBF], // DAC volume: 0 dB
+        [0x37, 0x08], // DAC equalizer bypassed
+    ];
+    let mut codec = RefCellDevice::new(bus);
+    for write in INIT {
+        codec.write(ES8311, &write).map_err(|_| Error::Codec)?;
+    }
+    Ok(())
 }
 
 /// The peripherals the battery measurement uses.
