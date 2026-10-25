@@ -38,7 +38,7 @@ use embassy_time::{Duration, Timer};
 use embedded_graphics_core::{
     Pixel,
     draw_target::DrawTarget,
-    geometry::{Dimensions, OriginDimensions, Size},
+    geometry::{OriginDimensions, Size},
     pixelcolor::{IntoStorage, Rgb565},
     primitives::Rectangle,
 };
@@ -279,6 +279,16 @@ impl Span {
         self.first > self.last
     }
 
+    /// The span, widened to take in column `x`.
+    #[allow(clippy::cast_possible_truncation, reason = "x < WIDTH (240)")]
+    fn with(self, x: usize) -> Self {
+        let x = x as u8;
+        Self {
+            first: self.first.min(x),
+            last: self.last.max(x),
+        }
+    }
+
     fn union(self, other: Self) -> Self {
         Self {
             first: self.first.min(other.first),
@@ -289,12 +299,12 @@ impl Span {
 
 /// A row's fingerprint: tells whether it differs from the row last sent.
 /// Each step is a bijection of the running value, so a change to one
-/// 4-byte word always shows; two changes cancelling out is a 1 in 2³²
+/// pair of pixels always shows; two changes cancelling out is a 1 in 2³²
 /// chance.
-fn row_hash(row: &[[u8; 2]]) -> u32 {
-    let (words, _) = row.as_flattened().as_chunks::<4>();
-    words.iter().fold(0x811C_9DC5, |hash, word| {
-        (hash ^ u32::from_le_bytes(*word))
+fn row_hash(row: &[u16]) -> u32 {
+    let (pairs, _) = row.as_chunks::<2>();
+    pairs.iter().fold(0x811C_9DC5, |hash, &[a, b]| {
+        (hash ^ (u32::from(a) | u32::from(b) << 16))
             .wrapping_mul(0x0100_0193)
             .rotate_left(5)
     })
@@ -313,8 +323,10 @@ fn row_hash(row: &[[u8; 2]]) -> u32 {
 /// static FRAME: ConstStaticCell<Frame> = ConstStaticCell::new(Frame::new());
 /// ```
 pub struct Frame {
-    /// Big-endian RGB565, row by row: the bytes the panel takes.
-    pixels: [[u8; 2]; W * H],
+    /// RGB565, row by row, each stored so that its bytes in memory are
+    /// big-endian: the bytes the panel takes. Whole `u16`s, so filling
+    /// takes one store a pixel.
+    pixels: [u16; W * H],
     /// What each row has had drawn on it since the last flush.
     written: [Span; H],
     /// Each row's [`row_hash`] when it was last sent.
@@ -330,7 +342,7 @@ impl Frame {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            pixels: [[0; 2]; W * H],
+            pixels: [0; W * H],
             written: [Span::FULL; H],
             sent: [0; H],
             stale: true,
@@ -359,10 +371,21 @@ impl Frame {
         Some(hash)
     }
 
+    /// `color` as [`pixels`](Self::pixels) stores it.
+    fn raw(color: Rgb565) -> u16 {
+        u16::from_ne_bytes(color.into_storage().to_be_bytes())
+    }
+
     /// Sets row `y`'s pixels `x0..=x1` to `raw`.
     #[allow(clippy::cast_possible_truncation, reason = "x < WIDTH (240)")]
-    fn fill_row(&mut self, y: usize, x0: usize, x1: usize, raw: [u8; 2]) {
-        self.pixels[y * W + x0..=y * W + x1].fill(raw);
+    fn fill_row(&mut self, y: usize, x0: usize, x1: usize, raw: u16) {
+        // Two pixels a store where the row is word-aligned: memory writes
+        // are what filling costs.
+        let row = &mut self.pixels[y * W + x0..=y * W + x1];
+        let (head, words, tail) = bytemuck::pod_align_to_mut::<u16, u32>(row);
+        head.fill(raw);
+        words.fill(u32::from(raw) * 0x0001_0001);
+        tail.fill(raw);
         let span = &mut self.written[y];
         span.first = span.first.min(x0 as u8);
         span.last = span.last.max(x1 as u8);
@@ -394,22 +417,28 @@ impl DrawTarget for Frame {
                 && x < W
                 && y < H
             {
-                self.fill_row(y, x, x, color.into_storage().to_be_bytes());
+                self.pixels[y * W + x] = Self::raw(color);
+                self.written[y] = self.written[y].with(x);
             }
         }
         Ok(())
     }
 
     fn fill_solid(&mut self, area: &Rectangle, color: Rgb565) -> Result<(), Infallible> {
-        let area = area.intersection(&self.bounding_box());
-        let Some(bottom_right) = area.bottom_right() else {
-            return Ok(());
+        // Clipped to the frame: `start..end` in each direction.
+        let clip = |start: i32, length: u32, limit: usize| {
+            let end = start.saturating_add_unsigned(length);
+            let clamp = |v: i32| usize::try_from(v).unwrap_or(0).min(limit);
+            (clamp(start), clamp(end))
         };
-        // Inside the frame, so not negative.
-        let at = |v: i32| usize::try_from(v).unwrap_or(0);
-        let raw = color.into_storage().to_be_bytes();
-        for y in at(area.top_left.y)..=at(bottom_right.y) {
-            self.fill_row(y, at(area.top_left.x), at(bottom_right.x), raw);
+        let (x0, x1) = clip(area.top_left.x, area.size.width, W);
+        let (y0, y1) = clip(area.top_left.y, area.size.height, H);
+        if x0 >= x1 {
+            return Ok(());
+        }
+        let raw = Self::raw(color);
+        for y in y0..y1 {
+            self.fill_row(y, x0, x1 - 1, raw);
         }
         Ok(())
     }
@@ -474,12 +503,12 @@ impl FrameDisplay {
             self.window(first, top, last, y - 1).await?;
             if first == 0 && last == W - 1 {
                 // Whole rows: one transfer.
-                self.write(frame.pixels[top * W..y * W].as_flattened())
+                self.write(bytemuck::cast_slice(&frame.pixels[top * W..y * W]))
                     .await?;
             } else {
                 for row in top..y {
                     let pixels = &frame.pixels[row * W + first..=row * W + last];
-                    self.write(pixels.as_flattened()).await?;
+                    self.write(bytemuck::cast_slice(pixels)).await?;
                 }
             }
             frame.sent[top..y].copy_from_slice(&hashes[top..y]);
