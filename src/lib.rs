@@ -28,6 +28,7 @@
 //! | I2S BCLK / WS / DOUT (to the ES8311; no MCLK) | 41 / 43 / 42 |
 
 #![no_std]
+#![warn(missing_docs)]
 
 use core::{cell::RefCell, convert::Infallible, fmt};
 
@@ -91,7 +92,7 @@ pub type Display =
     mipidsi::Display<SpiInterface<'static, DisplaySpi, Output<'static>>, ST7789, Output<'static>>;
 
 /// The peripherals the LCD uses.
-#[allow(missing_docs, reason = "the fields are the pins they're named after")]
+#[expect(missing_docs, reason = "the fields are the pins they're named after")]
 pub struct DisplayPins {
     pub spi: SPI2<'static>,
     pub sck: GPIO36<'static>,
@@ -269,7 +270,7 @@ impl Span {
         first: u8::MAX,
         last: 0,
     };
-    #[allow(clippy::cast_possible_truncation, reason = "the width (240) fits")]
+    #[expect(clippy::cast_possible_truncation, reason = "the width (240) fits")]
     const FULL: Self = Self {
         first: 0,
         last: (W - 1) as u8,
@@ -280,7 +281,7 @@ impl Span {
     }
 
     /// The span, widened to take in column `x`.
-    #[allow(clippy::cast_possible_truncation, reason = "x < WIDTH (240)")]
+    #[expect(clippy::cast_possible_truncation, reason = "x < WIDTH (240)")]
     fn with(self, x: usize) -> Self {
         let x = x as u8;
         Self {
@@ -377,7 +378,6 @@ impl Frame {
     }
 
     /// Sets row `y`'s pixels `x0..=x1` to `raw`.
-    #[allow(clippy::cast_possible_truncation, reason = "x < WIDTH (240)")]
     fn fill_row(&mut self, y: usize, x0: usize, x1: usize, raw: u16) {
         // Two pixels a store where the row is word-aligned: memory writes
         // are what filling costs.
@@ -386,9 +386,7 @@ impl Frame {
         head.fill(raw);
         words.fill(u32::from(raw) * 0x0001_0001);
         tail.fill(raw);
-        let span = &mut self.written[y];
-        span.first = span.first.min(x0 as u8);
-        span.last = span.last.max(x1 as u8);
+        self.written[y] = self.written[y].with(x0).with(x1);
     }
 }
 
@@ -490,7 +488,9 @@ impl FrameDisplay {
         while y < H {
             let top = y;
             let mut span = Span::CLEAN;
-            while let Some(hash) = (y < H).then(|| frame.changed(y)).flatten() {
+            while y < H
+                && let Some(hash) = frame.changed(y)
+            {
                 hashes[y] = hash;
                 span = span.union(frame.written[y]);
                 y += 1;
@@ -519,7 +519,7 @@ impl FrameDisplay {
     }
 
     /// Selects the rectangle the next pixels fill, row by row.
-    #[allow(clippy::cast_possible_truncation, reason = "inside the 240×135 frame")]
+    #[expect(clippy::cast_possible_truncation, reason = "inside the 240×135 frame")]
     async fn window(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) -> Result<(), Error> {
         let range = |from: usize, to: usize, offset: u16| {
             let [a, b] = (from as u16 + offset).to_be_bytes();
@@ -601,7 +601,7 @@ pub type I2cBus = Mutex<RefCell<I2c<'static, Blocking>>>;
 pub type I2cDevice = CriticalSectionDevice<'static, I2c<'static, Blocking>>;
 
 /// The peripherals the I2C bus uses.
-#[allow(missing_docs, reason = "the fields are the pins they're named after")]
+#[expect(missing_docs, reason = "the fields are the pins they're named after")]
 pub struct I2cPins {
     pub i2c: I2C0<'static>,
     pub sda: GPIO8<'static>,
@@ -698,12 +698,10 @@ impl Keyboard {
             let cleared = self.keys.clear_interrupts().is_ok();
             self.pending = !cleared || self.keys.events_available().unwrap_or(true);
 
-            let mut any_event = false;
+            let mut events = events.peekable();
+            let any_event = events.peek().is_some();
             let mut inputs = [None; MAX_INPUTS];
-            for (slot, input) in inputs.iter_mut().zip(events.filter_map(|event| {
-                any_event = true;
-                event.input
-            })) {
+            for (slot, input) in inputs.iter_mut().zip(events.filter_map(|event| event.input)) {
                 *slot = Some(input);
             }
             if !any_event {
@@ -780,15 +778,14 @@ pub fn keyboard_on(bus: &'static I2cBus, interrupt: GPIO11<'static>) -> Result<K
         keys.clear_interrupts().map_err(|_| Error::Keyboard)?;
         Ok(keys)
     };
-    let mut keys = set_up();
-    for _ in 1..KEYBOARD_TRIES {
-        if keys.is_ok() {
-            break;
-        }
-        Delay::new().delay_millis(KEYBOARD_RETRY_MS);
-        keys = set_up();
-    }
-    let keys = keys?;
+    let keys = (0..KEYBOARD_TRIES)
+        .find_map(|attempt| {
+            if attempt > 0 {
+                Delay::new().delay_millis(KEYBOARD_RETRY_MS);
+            }
+            set_up().ok()
+        })
+        .ok_or(Error::Keyboard)?;
     // The TCA8418's INT is open-drain.
     let interrupt = Input::new(interrupt, InputConfig::default().with_pull(Pull::Up));
     Ok(Keyboard {
@@ -837,20 +834,20 @@ pub fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
         I2cAddr, config,
         types::{AccBwp, AccConf, AccRange, Burst, Odr, PerfMode, PwrCtrl},
     };
-    let mut found = None;
-    for address in [I2cAddr::Default, I2cAddr::Alternative] {
-        let mut bmi = Bmi270::new_i2c(
-            CriticalSectionDevice::new(bus),
-            Delay::new(),
-            address,
-            Burst::new(IMU_BURST),
-        );
-        if bmi.get_chip_id().is_ok_and(|id| id == 0x24) {
-            found = Some(bmi);
-            break;
-        }
-    }
-    let mut bmi = found.ok_or(Error::Imu)?;
+    let mut bmi = [I2cAddr::Default, I2cAddr::Alternative]
+        .into_iter()
+        .find_map(|address| {
+            let mut bmi = Bmi270::new_i2c(
+                CriticalSectionDevice::new(bus),
+                Delay::new(),
+                address,
+                Burst::new(IMU_BURST),
+            );
+            bmi.get_chip_id()
+                .is_ok_and(|id| id == 0x24)
+                .then_some(bmi)
+        })
+        .ok_or(Error::Imu)?;
     bmi.init(&config::BMI270_CONFIG_FILE)
         .map_err(|_| Error::Imu)?;
     bmi.set_acc_range(AccRange::Range8g).map_err(|_| Error::Imu)?;
@@ -879,7 +876,7 @@ const SPEAKER_BUFFER: usize = 4096;
 const SPEAKER_CHUNK: usize = 512;
 
 /// The peripherals the speaker uses.
-#[allow(missing_docs, reason = "the fields are the pins they're named after")]
+#[expect(missing_docs, reason = "the fields are the pins they're named after")]
 pub struct SpeakerPins {
     pub i2s: I2S0<'static>,
     pub dma: DMA_CH0<'static>,
