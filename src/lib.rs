@@ -32,10 +32,19 @@
 use core::{cell::RefCell, convert::Infallible, fmt};
 
 pub use cardputer_adv_keyboard as keys;
+use critical_section::Mutex;
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
+use embedded_graphics_core::{
+    Pixel,
+    draw_target::DrawTarget,
+    geometry::{Dimensions, OriginDimensions, Size},
+    pixelcolor::{IntoStorage, Rgb565},
+    primitives::Rectangle,
+};
+use embedded_hal::digital::OutputPin;
 use embedded_hal_bus::{
-    i2c::RefCellDevice,
+    i2c::CriticalSectionDevice,
     spi::{ExclusiveDevice, NoDelay},
 };
 use esp_hal::{
@@ -58,13 +67,13 @@ use esp_hal::{
     },
     spi::{
         Mode,
-        master::{Config as SpiConfig, Spi},
+        master::{AnySpi, Config as SpiConfig, Spi, SpiDma, SpiMasterDmaChannel},
     },
     time::Rate,
 };
 use mipidsi::{
     Builder,
-    interface::SpiInterface,
+    interface::{Interface, InterfacePixelFormat, SpiInterface},
     models::ST7789,
     options::{ColorInversion, Orientation, Rotation},
 };
@@ -117,6 +126,8 @@ pub enum Error {
     Speaker,
     /// The ES8311 codec didn't answer.
     Codec,
+    /// A frame couldn't be sent to the LCD.
+    DisplayWrite,
 }
 
 impl fmt::Display for Error {
@@ -130,6 +141,7 @@ impl fmt::Display for Error {
             Self::Imu => "motion sensor (BMI270) not found or not starting",
             Self::Speaker => "speaker I2S stream failed",
             Self::Codec => "audio codec (ES8311) not answering",
+            Self::DisplayWrite => "LCD frame write failed",
         })
     }
 }
@@ -204,33 +216,360 @@ pub fn display(pins: DisplayPins) -> Result<(Display, Backlight), Error> {
     let dc = Output::new(pins.dc, Level::Low, OutputConfig::default());
     let reset = Output::new(pins.reset, Level::High, OutputConfig::default());
     let cs = Output::new(pins.cs, Level::High, OutputConfig::default());
-    let spi = Spi::new(
-        pins.spi,
-        SpiConfig::default()
-            .with_frequency(Rate::from_mhz(40))
-            .with_mode(Mode::_0),
-    )
-    .map_err(|_| Error::Spi)?
-    .with_sck(pins.sck)
-    .with_mosi(pins.mosi);
+    let spi = Spi::new(pins.spi, spi_config())
+        .map_err(|_| Error::Spi)?
+        .with_sck(pins.sck)
+        .with_mosi(pins.mosi);
     let device = ExclusiveDevice::new_no_delay(spi, cs).map_err(|_| Error::Spi)?;
     let interface = SpiInterface::new(device, dc, BUFFER.init([0; 512]));
-    let display = Builder::new(ST7789, interface)
-        .reset_pin(reset)
-        .display_size(HEIGHT, WIDTH)
-        .display_offset(52, 40)
-        .orientation(Orientation::new().rotate(Rotation::Deg90))
-        .invert_colors(ColorInversion::Inverted)
-        .init(&mut Delay::new())
-        .map_err(|_| Error::DisplayInit)?;
+    let display = init_panel(interface, reset)?;
     Ok((display, backlight))
 }
 
+/// The LCD's SPI bus: 40 MHz, as M5GFX runs it.
+fn spi_config() -> SpiConfig {
+    SpiConfig::default()
+        .with_frequency(Rate::from_mhz(40))
+        .with_mode(Mode::_0)
+}
+
+/// Where the panel's 135×240 pixels sit in the ST7789's 240×320 memory.
+const PANEL_OFFSET: (u16, u16) = (52, 40);
+
+/// Initialises the panel in landscape (keyboard below), colours inverted.
+fn init_panel<DI, RST>(interface: DI, reset: RST) -> Result<mipidsi::Display<DI, ST7789, RST>, Error>
+where
+    DI: Interface,
+    Rgb565: InterfacePixelFormat<DI::Word>,
+    RST: OutputPin,
+{
+    Builder::new(ST7789, interface)
+        .reset_pin(reset)
+        .display_size(HEIGHT, WIDTH)
+        .display_offset(PANEL_OFFSET.0, PANEL_OFFSET.1)
+        .orientation(Orientation::new().rotate(Rotation::Deg90))
+        .invert_colors(ColorInversion::Inverted)
+        .init(&mut Delay::new())
+        .map_err(|_| Error::DisplayInit)
+}
+
+const W: usize = WIDTH as usize;
+const H: usize = HEIGHT as usize;
+
+/// The columns of a row written since the last flush, `first..=last`.
+/// Clean when `first > last`.
+#[derive(Clone, Copy)]
+struct Span {
+    first: u8,
+    last: u8,
+}
+
+impl Span {
+    const CLEAN: Self = Self {
+        first: u8::MAX,
+        last: 0,
+    };
+    #[allow(clippy::cast_possible_truncation, reason = "the width (240) fits")]
+    const FULL: Self = Self {
+        first: 0,
+        last: (W - 1) as u8,
+    };
+
+    const fn is_clean(self) -> bool {
+        self.first > self.last
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            first: self.first.min(other.first),
+            last: self.last.max(other.last),
+        }
+    }
+}
+
+/// A row's fingerprint: tells whether it differs from the row last sent.
+/// Each step is a bijection of the running value, so a change to one
+/// 4-byte word always shows; two changes cancelling out is a 1 in 2³²
+/// chance.
+fn row_hash(row: &[[u8; 2]]) -> u32 {
+    let (words, _) = row.as_flattened().as_chunks::<4>();
+    words.iter().fold(0x811C_9DC5, |hash, word| {
+        (hash ^ u32::from_le_bytes(*word))
+            .wrapping_mul(0x0100_0193)
+            .rotate_left(5)
+    })
+}
+
+/// The whole screen in memory (64.8 kB of RGB565), for [`FrameDisplay`].
+///
+/// Draw into it with embedded-graphics, overlapping shapes freely; then
+/// [`FrameDisplay::flush`] sends only the rows that changed since the last
+/// flush. Rows are compared with what was sent, so redrawing everything
+/// each frame is fine: rows that come out the same aren't sent again.
+///
+/// It's too big for a task's stack; keep it in a static:
+///
+/// ```ignore
+/// static FRAME: ConstStaticCell<Frame> = ConstStaticCell::new(Frame::new());
+/// ```
+pub struct Frame {
+    /// Big-endian RGB565, row by row: the bytes the panel takes.
+    pixels: [[u8; 2]; W * H],
+    /// What each row has had drawn on it since the last flush.
+    written: [Span; H],
+    /// Each row's [`row_hash`] when it was last sent.
+    sent: [u32; H],
+    /// Send every written row, whatever its hash: the panel's contents
+    /// aren't known.
+    stale: bool,
+}
+
+impl Frame {
+    /// A black frame, all of it still to be sent (the panel starts with
+    /// whatever its memory held).
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            pixels: [[0; 2]; W * H],
+            written: [Span::FULL; H],
+            sent: [0; H],
+            stale: true,
+        }
+    }
+
+    /// Marks the whole frame to be sent again, for when the panel's
+    /// contents were lost or overwritten.
+    pub const fn invalidate(&mut self) {
+        self.written = [Span::FULL; H];
+        self.stale = true;
+    }
+
+    /// Row `y`'s hash, if it has to be sent: it was written, and it differs
+    /// from what was sent. A row written back the way it was is marked
+    /// clean.
+    fn changed(&mut self, y: usize) -> Option<u32> {
+        if self.written[y].is_clean() {
+            return None;
+        }
+        let hash = row_hash(&self.pixels[y * W..(y + 1) * W]);
+        if !self.stale && hash == self.sent[y] {
+            self.written[y] = Span::CLEAN;
+            return None;
+        }
+        Some(hash)
+    }
+
+    /// Sets row `y`'s pixels `x0..=x1` to `raw`.
+    #[allow(clippy::cast_possible_truncation, reason = "x < WIDTH (240)")]
+    fn fill_row(&mut self, y: usize, x0: usize, x1: usize, raw: [u8; 2]) {
+        self.pixels[y * W + x0..=y * W + x1].fill(raw);
+        let span = &mut self.written[y];
+        span.first = span.first.min(x0 as u8);
+        span.last = span.last.max(x1 as u8);
+    }
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OriginDimensions for Frame {
+    fn size(&self) -> Size {
+        Size::new(WIDTH.into(), HEIGHT.into())
+    }
+}
+
+impl DrawTarget for Frame {
+    type Color = Rgb565;
+    type Error = Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Infallible>
+    where
+        I: IntoIterator<Item = Pixel<Rgb565>>,
+    {
+        for Pixel(point, color) in pixels {
+            if let (Ok(x), Ok(y)) = (usize::try_from(point.x), usize::try_from(point.y))
+                && x < W
+                && y < H
+            {
+                self.fill_row(y, x, x, color.into_storage().to_be_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_solid(&mut self, area: &Rectangle, color: Rgb565) -> Result<(), Infallible> {
+        let area = area.intersection(&self.bounding_box());
+        let Some(bottom_right) = area.bottom_right() else {
+            return Ok(());
+        };
+        // Inside the frame, so not negative.
+        let at = |v: i32| usize::try_from(v).unwrap_or(0);
+        let raw = color.into_storage().to_be_bytes();
+        for y in at(area.top_left.y)..=at(bottom_right.y) {
+            self.fill_row(y, at(area.top_left.x), at(bottom_right.x), raw);
+        }
+        Ok(())
+    }
+}
+
+/// The LCD, fed from a [`Frame`] by DMA: sending a whole frame takes about
+/// 13 ms (64.8 kB at 40 MHz), during which other tasks run.
+pub struct FrameDisplay {
+    spi: SpiDma<'static, Async>,
+    cs: Output<'static>,
+    dc: Output<'static>,
+    /// Held high: the panel resets while it's low.
+    _reset: Output<'static>,
+}
+
+/// Transfers shorter than this go by the CPU, not DMA. Commands are a few
+/// bytes, and may be in flash, where DMA can't read.
+const MIN_DMA_TRANSFER: usize = 64;
+
+/// The ST7789 commands [`FrameDisplay`] sends.
+const CASET: u8 = 0x2A;
+const RASET: u8 = 0x2B;
+const RAMWR: u8 = 0x2C;
+
+/// The landscape frame's origin in the ST7789's memory, as mipidsi works it
+/// out for a 90° rotation: columns mirrored, then swapped with rows.
+const COLUMN_OFFSET: u16 = PANEL_OFFSET.1;
+const ROW_OFFSET: u16 = 240 - (HEIGHT + PANEL_OFFSET.0);
+
+impl FrameDisplay {
+    /// Sends the rows of `frame` that changed since the last flush, each run
+    /// of changed rows as one rectangle, as wide as what was drawn on them.
+    ///
+    /// If this is cancelled, the rows not yet sent are sent next time.
+    ///
+    /// # Errors
+    ///
+    /// If the SPI transfer fails; the rows not sent stay changed.
+    pub async fn flush(&mut self, frame: &mut Frame) -> Result<(), Error> {
+        self.cs.set_low();
+        let sent = self.send(frame).await;
+        self.cs.set_high();
+        sent
+    }
+
+    async fn send(&mut self, frame: &mut Frame) -> Result<(), Error> {
+        let mut hashes = [0; H];
+        let mut y = 0;
+        while y < H {
+            let top = y;
+            let mut span = Span::CLEAN;
+            while let Some(hash) = (y < H).then(|| frame.changed(y)).flatten() {
+                hashes[y] = hash;
+                span = span.union(frame.written[y]);
+                y += 1;
+            }
+            if span.is_clean() {
+                y += 1;
+                continue;
+            }
+            let (first, last) = (usize::from(span.first), usize::from(span.last));
+            self.window(first, top, last, y - 1).await?;
+            if first == 0 && last == W - 1 {
+                // Whole rows: one transfer.
+                self.write(frame.pixels[top * W..y * W].as_flattened())
+                    .await?;
+            } else {
+                for row in top..y {
+                    let pixels = &frame.pixels[row * W + first..=row * W + last];
+                    self.write(pixels.as_flattened()).await?;
+                }
+            }
+            frame.sent[top..y].copy_from_slice(&hashes[top..y]);
+            frame.written[top..y].fill(Span::CLEAN);
+        }
+        frame.stale = false;
+        Ok(())
+    }
+
+    /// Selects the rectangle the next pixels fill, row by row.
+    #[allow(clippy::cast_possible_truncation, reason = "inside the 240×135 frame")]
+    async fn window(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) -> Result<(), Error> {
+        let range = |from: usize, to: usize, offset: u16| {
+            let [a, b] = (from as u16 + offset).to_be_bytes();
+            let [c, d] = (to as u16 + offset).to_be_bytes();
+            [a, b, c, d]
+        };
+        self.command(CASET, &range(x0, x1, COLUMN_OFFSET)).await?;
+        self.command(RASET, &range(y0, y1, ROW_OFFSET)).await?;
+        self.command(RAMWR, &[]).await
+    }
+
+    async fn command(&mut self, command: u8, args: &[u8]) -> Result<(), Error> {
+        self.dc.set_low();
+        self.write(&[command]).await?;
+        self.dc.set_high();
+        self.write(args).await
+    }
+
+    async fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        // Returns once the bytes are out, so DC can change after it.
+        self.spi
+            .write_async(bytes)
+            .await
+            .map_err(|_| Error::DisplayWrite)
+    }
+}
+
+/// Initialises the LCD to be fed from a [`Frame`] by DMA, on the DMA channel
+/// given, and turns the backlight on at full brightness.
+///
+/// # Errors
+///
+/// If the SPI bus or the panel can't be set up.
+///
+/// # Panics
+///
+/// If called twice, or with [`display`] (the PWM timer is a `static`).
+pub fn frame_display(
+    pins: DisplayPins,
+    dma: impl SpiMasterDmaChannel<'static, AnySpi<'static>>,
+) -> Result<(FrameDisplay, Backlight), Error> {
+    let backlight = backlight(pins.ledc, pins.backlight)?;
+    let mut dc = Output::new(pins.dc, Level::Low, OutputConfig::default());
+    let mut reset = Output::new(pins.reset, Level::High, OutputConfig::default());
+    let mut cs = Output::new(pins.cs, Level::High, OutputConfig::default());
+    let mut spi = Spi::new(
+        pins.spi,
+        spi_config().with_min_async_transfer_size(MIN_DMA_TRANSFER),
+    )
+    .map_err(|_| Error::Spi)?
+    .with_sck(pins.sck)
+    .with_mosi(pins.mosi)
+    .with_dma(dma);
+    // mipidsi sets the panel up through borrows, which then end: the
+    // flushes drive it directly.
+    let mut buffer = [0; 64];
+    let device = ExclusiveDevice::new_no_delay(&mut spi, &mut cs).map_err(|_| Error::Spi)?;
+    init_panel(SpiInterface::new(device, &mut dc, &mut buffer), &mut reset)?;
+    Ok((
+        FrameDisplay {
+            spi: spi.into_async(),
+            cs,
+            dc,
+            _reset: reset,
+        },
+        backlight,
+    ))
+}
+
 /// The I2C bus: the keyboard, the ES8311 codec and the BMI270 share it.
-pub type I2cBus = RefCell<I2c<'static, Blocking>>;
+///
+/// Each transfer holds a critical section (interrupts off, the other core
+/// kept out), so its devices can be used from any executor or core. That
+/// delays interrupts by the transfer: about 0.3 ms for a key or motion
+/// read, and 3 ms for each 128-byte burst of the motion sensor's start-up.
+pub type I2cBus = Mutex<RefCell<I2c<'static, Blocking>>>;
 
 /// One device's handle on the shared [`I2cBus`].
-pub type I2cDevice = RefCellDevice<'static, I2c<'static, Blocking>>;
+pub type I2cDevice = CriticalSectionDevice<'static, I2c<'static, Blocking>>;
 
 /// The peripherals the I2C bus uses.
 #[allow(missing_docs, reason = "the fields are the pins they're named after")]
@@ -240,9 +579,7 @@ pub struct I2cPins {
     pub scl: GPIO9<'static>,
 }
 
-/// Sets up the shared I2C bus (400 kHz). Its devices borrow it only for
-/// each transfer, never across an `.await`, so they can be used from one
-/// executor's tasks.
+/// Sets up the shared I2C bus (400 kHz).
 ///
 /// # Errors
 ///
@@ -260,7 +597,7 @@ pub fn i2c(pins: I2cPins) -> Result<&'static I2cBus, Error> {
     .map_err(|_| Error::I2c)?
     .with_sda(pins.sda)
     .with_scl(pins.scl);
-    Ok(BUS.init(RefCell::new(i2c)))
+    Ok(BUS.init(Mutex::new(RefCell::new(i2c))))
 }
 
 /// The peripherals the keyboard uses.
@@ -400,7 +737,7 @@ pub fn keyboard(pins: KeyboardPins) -> Result<Keyboard, Error> {
 ///
 /// If the TCA8418 can't be set up.
 pub fn keyboard_on(bus: &'static I2cBus, interrupt: GPIO11<'static>) -> Result<Keyboard, Error> {
-    let mut keys = keys::Keyboard::new(RefCellDevice::new(bus)).map_err(|_| Error::Keyboard)?;
+    let mut keys = keys::Keyboard::new(CriticalSectionDevice::new(bus)).map_err(|_| Error::Keyboard)?;
     keys.enable_keyboard_interrupt()
         .map_err(|_| Error::Keyboard)?;
     keys.clear_interrupts().map_err(|_| Error::Keyboard)?;
@@ -455,7 +792,7 @@ pub fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
     let mut found = None;
     for address in [I2cAddr::Default, I2cAddr::Alternative] {
         let mut bmi = Bmi270::new_i2c(
-            RefCellDevice::new(bus),
+            CriticalSectionDevice::new(bus),
             Delay::new(),
             address,
             Burst::new(IMU_BURST),
@@ -632,7 +969,7 @@ pub fn enable_codec(bus: &'static I2cBus) -> Result<(), Error> {
         [ES8311_DAC_VOLUME, 0xBF], // DAC volume: 0 dB
         [0x37, 0x08], // DAC equalizer bypassed
     ];
-    let mut codec = RefCellDevice::new(bus);
+    let mut codec = CriticalSectionDevice::new(bus);
     for write in INIT {
         codec.write(ES8311, &write).map_err(|_| Error::Codec)?;
     }
@@ -653,7 +990,7 @@ pub fn set_volume(bus: &'static I2cBus, percent: u8) -> Result<(), Error> {
     use embedded_hal::i2c::I2c as _;
     let step = u16::from(percent.min(100)) * 0xBF / 100;
     let register = u8::try_from(step).unwrap_or(0xBF);
-    RefCellDevice::new(bus)
+    CriticalSectionDevice::new(bus)
         .write(ES8311, &[ES8311_DAC_VOLUME, register])
         .map_err(|_| Error::Codec)
 }

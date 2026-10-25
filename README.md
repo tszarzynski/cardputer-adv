@@ -2,7 +2,10 @@
 
 Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/Cardputer-Adv) (ESP32-S3) on [esp-hal](https://github.com/esp-rs/esp-hal) 1.x.
 
-- `display(DisplayPins)` sets up the 1.14" ST7789V2 LCD and turns the backlight on. You get it back as a 240×135 RGB565 [embedded-graphics](https://docs.rs/embedded-graphics) `DrawTarget`, in landscape with the keyboard below, and a `Backlight`. `Backlight::set_percent` dims it with 256 Hz PWM on LEDC (as M5GFX does; the LED driver doesn't follow fast PWM); the RGB LED, on the same pin, dims too.
+- `display(DisplayPins)` sets up the 1.14" ST7789V2 LCD and turns the backlight on. You get it back as a 240×135 RGB565 [embedded-graphics](https://docs.rs/embedded-graphics) `DrawTarget`, in landscape with the keyboard below, and a `Backlight`. It draws straight to the panel, so each shape shows as it's drawn. `Backlight::set_percent` dims it with 256 Hz PWM on LEDC (as M5GFX does; the LED driver doesn't follow fast PWM); the RGB LED, on the same pin, dims too.
+- `frame_display(DisplayPins, dma)` sets up the same LCD to be fed from a `Frame`: a 240×135 RGB565 framebuffer (64.8 kB, kept in a static) that you draw into with embedded-graphics. `FrameDisplay::flush(&mut frame).await` then sends it by DMA, so other tasks run meanwhile.
+  - Only pixels whose colour changed are sent: each run of changed rows goes as one rectangle, as wide as its changes. Redrawing the whole frame every time is fine.
+  - A whole frame takes 13 ms at 40 MHz. Drawing straight to the panel through `display` sends a frame in about 28 ms, converting pixel by pixel.
 - `keyboard(KeyboardPins)` sets up the 56-key TCA8418 keyboard on I2C, with Shift and Fn layers from [cardputer-adv-keyboard](https://crates.io/crates/cardputer-adv-keyboard). Fn + `;` `.` `,` `/` gives the arrow keys.
 - `Keyboard::wait_inputs().await` sleeps until the TCA8418 pulls its interrupt line (GPIO11) low, then returns the keys pressed.
   - It waits for the low level, not an edge, so events that arrive while you're busy aren't lost.
@@ -10,7 +13,7 @@ Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/C
 - `imu(&I2cBus)` finds the BMI270 motion sensor (at 0x68 or 0x69), uploads its configuration through [bmi2](https://crates.io/crates/bmi2) and turns on its accelerometer at ±8 g and 100 Hz. `Imu::acceleration()` reads it in milli-g.
 - `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `enable_codec(&I2cBus)` then turns on the codec's DAC path to the NS4150B amplifier, and `set_volume(&I2cBus, percent)` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
   - The buffer holds 23 ms. If `fill` falls further behind, the stream restarts on silence, so the sound skips rather than stops.
-  - To avoid skips while anything else holds the CPU for longer (drawing a whole frame can take 30–40 ms), run the speaker on a higher-priority executor, such as esp-rtos's `InterruptExecutor`.
+  - To avoid skips while anything else holds the CPU for longer (drawing a frame straight to the panel takes about 30 ms), run the speaker on a higher-priority executor, such as esp-rtos's `InterruptExecutor`.
 - `i2c(I2cPins)` sets up the I2C bus that the keyboard, codec and motion sensor share. Pass it to `keyboard_on`, `imu` and `enable_codec`. `keyboard(KeyboardPins)` sets the bus up itself, for when the keyboard is all you need.
 - `battery(BatteryPins)` measures the battery voltage (`Battery::millivolts()`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does. The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
 
@@ -51,6 +54,23 @@ cardputer_adv::set_volume(bus, 60)?;
 let Err(error) = speaker.run(|samples| samples.fill(0)).await; // runs until it fails
 ```
 
+With a framebuffer, sent by DMA:
+
+```rust
+use cardputer_adv::Frame;
+use static_cell::ConstStaticCell;
+
+static FRAME: ConstStaticCell<Frame> = ConstStaticCell::new(Frame::new());
+
+let (mut display, _backlight) = cardputer_adv::frame_display(pins, p.DMA_CH1)?;
+let frame = FRAME.take();
+loop {
+    frame.clear(Rgb565::BLACK)?; // Infallible
+    // …draw the rest…
+    display.flush(frame).await?; // only what changed
+}
+```
+
 ## Pins
 
 | Function | GPIO |
@@ -62,7 +82,7 @@ let Err(error) = speaker.run(|samples| samples.fill(0)).await; // runs until it 
 | Keyboard interrupt | 11 |
 | I2S BCLK / WS / DOUT, to the ES8311 (no MCLK: it clocks from BCLK) | 41 / 43 / 42 |
 
-The I2C bus is a `RefCell` shared by `RefCellDevice`s. Each device borrows it only during a transfer, never across an `.await`, so it works from any tasks on one executor. It isn't `Sync`, so it can't be used from another executor or core.
+The I2C bus is a `critical_section::Mutex`, shared by embedded-hal-bus's `CriticalSectionDevice`s, so the keyboard, the codec and the motion sensor can be used from any executor or core. Each transfer holds the critical section, which delays interrupts by about 0.3 ms for a key or motion read. The motion sensor's start-up holds it for 3 ms per 128-byte burst.
 
 ## Status
 
