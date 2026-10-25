@@ -8,12 +8,16 @@ Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/C
   - It waits for the low level, not an edge, so events that arrive while you're busy aren't lost.
   - A 1 s fallback poll covers a missed interrupt; `missed_interrupts()` counts how often that poll was needed.
 - `imu(&I2cBus)` finds the BMI270 motion sensor (at 0x68 or 0x69), uploads its configuration through [bmi2](https://crates.io/crates/bmi2) and turns on its accelerometer at ±8 g and 100 Hz. `Imu::acceleration()` reads it in milli-g.
-- `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `enable_codec(&I2cBus)` then turns on the codec's DAC path to the NS4150B amplifier. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
-  - The buffer holds 23 ms. If anything else holds the CPU for longer (drawing a whole frame can take 30–40 ms), run the speaker on a higher-priority executor, such as esp-rtos's `InterruptExecutor`.
+- `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `enable_codec(&I2cBus)` then turns on the codec's DAC path to the NS4150B amplifier, and `set_volume(&I2cBus, percent)` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
+  - The buffer holds 23 ms. If `fill` falls further behind, the stream restarts on silence, so the sound skips rather than stops.
+  - To avoid skips while anything else holds the CPU for longer (drawing a whole frame can take 30–40 ms), run the speaker on a higher-priority executor, such as esp-rtos's `InterruptExecutor`.
 - `i2c(I2cPins)` sets up the I2C bus that the keyboard, codec and motion sensor share. Pass it to `keyboard_on`, `imu` and `enable_codec`. `keyboard(KeyboardPins)` sets the bus up itself, for when the keyboard is all you need.
 - `battery(BatteryPins)` measures the battery voltage (`Battery::millivolts()`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does. The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
 
 ```rust
+use cardputer_adv::{DisplayPins, KeyboardPins};
+use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
+
 let (mut display, mut backlight) = cardputer_adv::display(DisplayPins {
     spi: p.SPI2, sck: p.GPIO36, mosi: p.GPIO35, cs: p.GPIO37,
     dc: p.GPIO34, reset: p.GPIO33, backlight: p.GPIO38, ledc: p.LEDC,
@@ -21,7 +25,7 @@ let (mut display, mut backlight) = cardputer_adv::display(DisplayPins {
 let mut keyboard = cardputer_adv::keyboard(KeyboardPins {
     i2c: p.I2C0, sda: p.GPIO8, scl: p.GPIO9, interrupt: p.GPIO11,
 })?;
-display.clear(Rgb565::BLACK)?;
+display.clear(Rgb565::BLACK).expect("LCD"); // mipidsi's own error type
 loop {
     for key in keyboard.wait_inputs().await? { /* … */ }
 }
@@ -30,18 +34,21 @@ loop {
 With the motion sensor and the speaker, set the shared bus up first:
 
 ```rust
+use cardputer_adv::{I2cPins, SpeakerPins};
+
 let bus = cardputer_adv::i2c(I2cPins { i2c: p.I2C0, sda: p.GPIO8, scl: p.GPIO9 })?;
 let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11)?;
 let mut imu = cardputer_adv::imu(bus)?;
 let [x, y, z] = imu.acceleration()?; // milli-g
 
 // In a task (ideally on a higher-priority executor):
-let speaker = cardputer_adv::speaker(SpeakerPins {
+let mut speaker = cardputer_adv::speaker(SpeakerPins {
     i2s: p.I2S0, dma: p.DMA_CH0, bclk: p.GPIO41, ws: p.GPIO43, dout: p.GPIO42,
 })?;
 // …and once it's running (the codec clocks itself from the stream):
 cardputer_adv::enable_codec(bus)?;
-let error = speaker.run(|samples| samples.fill(0)).await;
+cardputer_adv::set_volume(bus, 60)?;
+let Err(error) = speaker.run(|samples| samples.fill(0)).await; // runs until it fails
 ```
 
 ## Pins
@@ -59,7 +66,7 @@ The I2C bus is a `RefCell` shared by `RefCellDevice`s. Each device borrows it on
 
 ## Status
 
-The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). The display and the keyboard, including its interrupt line, work on a Cardputer ADV (tested October 2026). So do the motion sensor (found at 0x68) and the speaker. The ES8311 sequence is M5Unified's Cardputer ADV speaker enable, as [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver uses it. The battery reading is new and not yet checked against a multimeter.
+The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). The display and the keyboard, including its interrupt line, work on a Cardputer ADV (tested October 2026). So do the motion sensor and the speaker. `imu` tries the BMI270's two addresses, 0x68 then 0x69, because sources disagree on which one the ADV uses (espp says 0x68, oxstack 0x69). The ES8311 sequence is M5Unified's Cardputer ADV speaker enable, as [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver uses it. The battery reading is new and not yet checked against a multimeter.
 
 ## Licence
 

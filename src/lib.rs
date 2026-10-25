@@ -8,9 +8,11 @@
 //!   the TCA8418 signals a key event on its interrupt line.
 //! - [`imu`]: the BMI270 motion sensor's accelerometer, in milli-g.
 //! - [`speaker`]: the speaker, fed with samples over I2S (the ES8311 codec,
-//!   then an NS4150B amplifier); [`enable_codec`] turns its DAC path on.
-//! - [`i2c`]: the I2C bus the keyboard and the motion sensor share. Only
-//!   needed to use both; [`keyboard`] alone sets it up itself.
+//!   then an NS4150B amplifier); [`enable_codec`] turns its DAC path on and
+//!   [`set_volume`] sets its level.
+//! - [`i2c`]: the I2C bus the keyboard, the codec and the motion sensor
+//!   share. Only needed to use more than the keyboard; [`keyboard`] alone
+//!   sets it up itself.
 //! - [`battery`]: the battery voltage. The board can't tell whether it's
 //!   charging.
 //!
@@ -27,7 +29,7 @@
 
 #![no_std]
 
-use core::cell::RefCell;
+use core::{cell::RefCell, convert::Infallible, fmt};
 
 pub use cardputer_adv_keyboard as keys;
 use embassy_futures::select::{Either, select};
@@ -68,8 +70,9 @@ use mipidsi::{
 };
 use static_cell::StaticCell;
 
-/// Display width and height in landscape.
+/// Display width in landscape.
 pub const WIDTH: u16 = 240;
+/// Display height in landscape.
 pub const HEIGHT: u16 = 135;
 
 type DisplaySpi = ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, NoDelay>;
@@ -79,6 +82,7 @@ pub type Display =
     mipidsi::Display<SpiInterface<'static, DisplaySpi, Output<'static>>, ST7789, Output<'static>>;
 
 /// The peripherals the LCD uses.
+#[allow(missing_docs, reason = "the fields are the pins they're named after")]
 pub struct DisplayPins {
     pub spi: SPI2<'static>,
     pub sck: GPIO36<'static>,
@@ -91,20 +95,46 @@ pub struct DisplayPins {
     pub ledc: LEDC<'static>,
 }
 
-#[derive(Debug)]
+/// What failed. The underlying driver errors aren't kept: on this board,
+/// each part has one way to fail that matters (it didn't answer, or the
+/// peripheral couldn't be configured).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
+    /// The LCD's SPI bus couldn't be configured.
     Spi,
+    /// The I2C bus couldn't be configured.
     I2c,
+    /// The LCD didn't take its initialisation sequence.
     DisplayInit,
+    /// The TCA8418 keyboard controller didn't answer.
     Keyboard,
+    /// The backlight's PWM couldn't be configured.
     Backlight,
     /// The motion sensor wasn't found, or didn't start.
     Imu,
-    /// The I2S output didn't start, or ran dry.
+    /// The I2S output couldn't be started, or restarted after running dry.
     Speaker,
     /// The ES8311 codec didn't answer.
     Codec,
 }
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Spi => "LCD SPI bus setup failed",
+            Self::I2c => "I2C bus setup failed",
+            Self::DisplayInit => "LCD initialisation failed",
+            Self::Keyboard => "keyboard controller (TCA8418) not answering",
+            Self::Backlight => "backlight PWM setup failed",
+            Self::Imu => "motion sensor (BMI270) not found or not starting",
+            Self::Speaker => "speaker I2S stream failed",
+            Self::Codec => "audio codec (ES8311) not answering",
+        })
+    }
+}
+
+impl core::error::Error for Error {}
 
 /// The LCD backlight, dimmable: PWM at 256 Hz from LEDC low-speed channel
 /// 0, as M5Stack's M5GFX drives it on the Cardputer. Its LED driver can't
@@ -203,6 +233,7 @@ pub type I2cBus = RefCell<I2c<'static, Blocking>>;
 pub type I2cDevice = RefCellDevice<'static, I2c<'static, Blocking>>;
 
 /// The peripherals the I2C bus uses.
+#[allow(missing_docs, reason = "the fields are the pins they're named after")]
 pub struct I2cPins {
     pub i2c: I2C0<'static>,
     pub sda: GPIO8<'static>,
@@ -234,8 +265,11 @@ pub fn i2c(pins: I2cPins) -> Result<&'static I2cBus, Error> {
 
 /// The peripherals the keyboard uses.
 pub struct KeyboardPins {
+    /// The I2C bus it shares (set up by [`keyboard`]).
     pub i2c: I2C0<'static>,
+    /// I2C data.
     pub sda: GPIO8<'static>,
+    /// I2C clock.
     pub scl: GPIO9<'static>,
     /// The TCA8418's interrupt output (active low).
     pub interrupt: GPIO11<'static>,
@@ -460,6 +494,7 @@ const SPEAKER_BUFFER: usize = 4096;
 const SPEAKER_CHUNK: usize = 512;
 
 /// The peripherals the speaker uses.
+#[allow(missing_docs, reason = "the fields are the pins they're named after")]
 pub struct SpeakerPins {
     pub i2s: I2S0<'static>,
     pub dma: DMA_CH0<'static>,
@@ -468,30 +503,46 @@ pub struct SpeakerPins {
     pub dout: GPIO42<'static>,
 }
 
+type SpeakerTransfer = I2sTxDmaTransfer<'static, Async, DmaTxStreamBuf>;
+
+/// Bytes of silence pushed at a time when (re)starting the stream.
+const SILENCE: [u8; 64] = [0; 64];
+
 /// The speaker: an I2S stream to the ES8311 codec, playing silence until
 /// [`run`](Self::run) feeds it.
 pub struct Speaker {
-    transfer: I2sTxDmaTransfer<'static, Async, DmaTxStreamBuf>,
+    /// `None` only while restarting.
+    transfer: Option<SpeakerTransfer>,
 }
 
 impl Speaker {
     /// Plays the mono samples `fill` writes, at [`SAMPLE_RATE`], forever.
-    /// `fill` is asked for as many as the buffer has room for, every few
-    /// milliseconds; it must keep up, so run this on a high-priority
-    /// executor (such as an `InterruptExecutor`) if other tasks hold the CPU
-    /// for long.
     ///
-    /// Returns only if the stream stops: when `fill` didn't keep up and the
-    /// buffer ran dry.
-    pub async fn run(mut self, mut fill: impl FnMut(&mut [i16])) -> Error {
+    /// `fill` is asked for as many as the buffer has room for, every few
+    /// milliseconds. If it falls behind by more than the buffer (23 ms),
+    /// the DMA stops; the stream then restarts on silence, so the sound
+    /// skips rather than stops. To keep up while other tasks hold the CPU
+    /// for long (drawing a frame, say), run this on a higher-priority
+    /// executor, such as esp-rtos's `InterruptExecutor`.
+    ///
+    /// # Errors
+    ///
+    /// Returns only if the stream couldn't be restarted.
+    pub async fn run(&mut self, mut fill: impl FnMut(&mut [i16])) -> Result<Infallible, Error> {
         let mut mono = [0i16; 256];
         loop {
-            if self.transfer.wait_for_available_async().await.is_err() {
-                return Error::Speaker;
+            let transfer = self.transfer.as_mut().ok_or(Error::Speaker)?;
+            if transfer.wait_for_available_async().await.is_err() {
+                self.restart()?;
+                continue;
             }
             loop {
-                let pushed = self.transfer.push_with(|bytes| {
-                    // Stereo frames, the same sample left and right.
+                let pushed = transfer.push_with(|bytes| {
+                    // Stereo frames, the same sample left and right. The
+                    // chunks are multiples of 4 bytes, so a frame never
+                    // straddles two, and while there is room, there is
+                    // room for a whole frame.
+                    debug_assert!(bytes.is_empty() || bytes.len() >= 4);
                     let frames = (bytes.len() / 4).min(mono.len());
                     fill(&mut mono[..frames]);
                     for (frame, sample) in bytes.chunks_exact_mut(4).zip(&mono[..frames]) {
@@ -505,6 +556,19 @@ impl Speaker {
                 }
             }
         }
+    }
+
+    /// Starts the stream again after it ran dry: a fresh buffer of silence
+    /// on the same memory. The bit clock, and so the codec's clock, stopped
+    /// with it; the codec carries on when the clock does.
+    fn restart(&mut self) -> Result<(), Error> {
+        let transfer = self.transfer.take().ok_or(Error::Speaker)?;
+        let (tx, buffer) = transfer.stop();
+        let (descriptors, bytes) = buffer.split();
+        let mut buffer = DmaTxStreamBuf::new(descriptors, bytes).map_err(|_| Error::Speaker)?;
+        while buffer.push(&SILENCE) > 0 {}
+        self.transfer = Some(tx.write(buffer).map_err(|_| Error::Speaker)?);
+        Ok(())
     }
 }
 
@@ -538,9 +602,11 @@ pub fn speaker(pins: SpeakerPins) -> Result<Speaker, Error> {
         .build();
     let mut buffer = dma_tx_stream_buffer!(SPEAKER_BUFFER, SPEAKER_CHUNK);
     // Start full of silence.
-    while buffer.push(&[0; 64]) > 0 {}
+    while buffer.push(&SILENCE) > 0 {}
     let transfer = tx.write(buffer).map_err(|_| Error::Speaker)?;
-    Ok(Speaker { transfer })
+    Ok(Speaker {
+        transfer: Some(transfer),
+    })
 }
 
 /// The ES8311's I2C address.
@@ -563,7 +629,7 @@ pub fn enable_codec(bus: &'static I2cBus) -> Result<(), Error> {
         [0x0D, 0x01], // system: analog circuits on
         [0x12, 0x00], // system: DAC on
         [0x13, 0x10], // system: output to the amplifier on
-        [0x32, 0xBF], // DAC volume: 0 dB
+        [ES8311_DAC_VOLUME, 0xBF], // DAC volume: 0 dB
         [0x37, 0x08], // DAC equalizer bypassed
     ];
     let mut codec = RefCellDevice::new(bus);
@@ -573,8 +639,28 @@ pub fn enable_codec(bus: &'static I2cBus) -> Result<(), Error> {
     Ok(())
 }
 
+/// The ES8311's DAC volume register: 0x00 is −95.5 dB, 0xBF is 0 dB, in
+/// 0.5 dB steps.
+const ES8311_DAC_VOLUME: u8 = 0x32;
+
+/// Sets the speaker's level, 0 (silent, −95.5 dB) to 100 (0 dB, the level
+/// [`enable_codec`] starts at), evenly in decibels. The codec must be on.
+///
+/// # Errors
+///
+/// If the codec doesn't answer.
+pub fn set_volume(bus: &'static I2cBus, percent: u8) -> Result<(), Error> {
+    use embedded_hal::i2c::I2c as _;
+    let step = u16::from(percent.min(100)) * 0xBF / 100;
+    let register = u8::try_from(step).unwrap_or(0xBF);
+    RefCellDevice::new(bus)
+        .write(ES8311, &[ES8311_DAC_VOLUME, register])
+        .map_err(|_| Error::Codec)
+}
+
 /// The peripherals the battery measurement uses.
 pub struct BatteryPins {
+    /// The ADC the battery is read with.
     pub adc: ADC1<'static>,
     /// The battery, through the board's 2:1 divider.
     pub pin: GPIO10<'static>,

@@ -6,7 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-- First version: display, keyboard (interrupt-driven `wait_inputs`, with a fallback poll).
+- First version: display, keyboard (interrupt-driven `wait_inputs`, with a fallback poll), the backlight (`Backlight::set_percent`, 256 Hz PWM) and the battery voltage (`battery`).
 - The shared I2C bus (`i2c`, `keyboard_on`); `keyboard` still sets it up for the keyboard alone.
 - The BMI270 accelerometer (`imu`, `Imu::acceleration` in milli-g).
-- The speaker: an I2S DMA stream (`speaker`, `Speaker::run`) and the ES8311 codec's DAC path (`enable_codec`).
+- The speaker: an I2S DMA stream (`speaker`, `Speaker::run`), the ES8311 codec's DAC path (`enable_codec`) and its level (`set_volume`). The stream restarts on silence if it runs dry.
+- `Error` documents its variants and implements `Display` and `core::error::Error`; it's `#[non_exhaustive]`.
