@@ -9,12 +9,16 @@
 //! - [`imu`]: the BMI270 motion sensor's accelerometer, in milli-g.
 //! - [`speaker`]: the speaker, fed with samples over I2S (the ES8311 codec,
 //!   then an NS4150B amplifier); [`enable_codec`] turns its DAC path on and
-//!   [`set_volume`] sets its level.
+//!   returns the [`Codec`], which sets its level and turns its output off and
+//!   on.
 //! - [`i2c`]: the I2C bus the keyboard, the codec and the motion sensor
 //!   share. Only needed to use more than the keyboard; [`keyboard`] alone
 //!   sets it up itself.
-//! - [`battery`]: the battery voltage. The board can't tell whether it's
-//!   charging.
+//! - [`battery`]: the battery voltage, and the charge left as a percentage.
+//!   The board can't tell whether it's charging.
+//!
+//! The async parts ([`Keyboard::wait_inputs`], [`FrameDisplay::flush`],
+//! [`Speaker::run`]) need an embassy-time driver, such as esp-rtos's.
 //!
 //! Pins (from the ADV schematic and working firmware):
 //!
@@ -33,6 +37,9 @@
 use core::{cell::RefCell, convert::Infallible, fmt};
 
 pub use cardputer_adv_keyboard as keys;
+/// The display driver [`Display`] comes from, so its types can be named
+/// without matching its version.
+pub use mipidsi;
 use critical_section::Mutex;
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
@@ -52,7 +59,7 @@ use esp_hal::{
     Async, Blocking,
     delay::Delay,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation},
-    gpio::{DriveMode, Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{DriveMode, Event, Input, InputConfig, Level, Output, OutputConfig, Pull},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
         channel::{self, ChannelIFace},
@@ -457,6 +464,8 @@ pub struct FrameDisplay {
 const MIN_DMA_TRANSFER: usize = 64;
 
 /// The ST7789 commands [`FrameDisplay`] sends.
+const SLPIN: u8 = 0x10;
+const SLPOUT: u8 = 0x11;
 const CASET: u8 = 0x2A;
 const RASET: u8 = 0x2B;
 const RAMWR: u8 = 0x2C;
@@ -516,6 +525,27 @@ impl FrameDisplay {
         }
         frame.stale = false;
         Ok(())
+    }
+
+    /// Puts the panel's controller to sleep (`asleep`), keeping the picture
+    /// in its memory, or wakes it. Asleep it draws a few microamps instead
+    /// of a few milliamps; turn the [`Backlight`] off first, as the panel
+    /// shows nothing meanwhile.
+    ///
+    /// Returns once the controller can take the next command (5 ms). It
+    /// shouldn't be put back to sleep within 120 ms of waking.
+    ///
+    /// # Errors
+    ///
+    /// If the SPI transfer fails.
+    pub async fn set_asleep(&mut self, asleep: bool) -> Result<(), Error> {
+        self.cs.set_low();
+        let sent = self
+            .command(if asleep { SLPIN } else { SLPOUT }, &[])
+            .await;
+        self.cs.set_high();
+        Timer::after(Duration::from_millis(5)).await;
+        sent
     }
 
     /// Selects the rectangle the next pixels fill, row by row.
@@ -722,6 +752,14 @@ impl Keyboard {
             }
             return Ok(inputs.into_iter().flatten());
         }
+    }
+
+    /// Makes a key press end a light sleep (esp-hal's
+    /// `LowPower::sleep_light`): the interrupt line listens for its low
+    /// level, which wakes the chip. Call it just before sleeping; the key is
+    /// then read by [`wait_inputs`](Self::wait_inputs) as usual.
+    pub fn listen_for_wake(&mut self) {
+        self.interrupt.listen(Event::LowLevel);
     }
 
     /// How many times key events were found only by the fallback poll, which
@@ -994,17 +1032,76 @@ pub fn speaker(pins: SpeakerPins) -> Result<Speaker, Error> {
 /// The ES8311's I2C address.
 const ES8311: u8 = 0x18;
 
-/// Turns on the ES8311's DAC path to the amplifier, at 0 dB. Its master
-/// clock comes from the I2S bit clock (the board has no MCLK line), so the
-/// [`speaker`] stream must be running. The sequence is M5Unified's Cardputer
-/// ADV speaker enable, as espp's driver uses it.
+/// The ES8311's DAC volume register: 0x00 is −95.5 dB, 0xBF is 0 dB, in
+/// 0.5 dB steps.
+const ES8311_DAC_VOLUME: u8 = 0x32;
+
+/// The ES8311 codec, its DAC path to the amplifier on: what
+/// [`enable_codec`] returns. Holding one means the codec has been set up,
+/// so its level and output can be changed.
+pub struct Codec {
+    device: I2cDevice,
+}
+
+impl Codec {
+    /// Sets the speaker's level, 0 (silent, −95.5 dB) to 100 (0 dB, the
+    /// level [`enable_codec`] starts at), evenly in decibels.
+    ///
+    /// # Errors
+    ///
+    /// If the codec doesn't answer.
+    pub fn set_volume(&mut self, percent: u8) -> Result<(), Error> {
+        let step = u16::from(percent.min(100)) * 0xBF / 100;
+        let register = u8::try_from(step).unwrap_or(0xBF);
+        self.write(&[[ES8311_DAC_VOLUME, register]])
+    }
+
+    /// Turns the output to the amplifier off (`on = false`), or back on as
+    /// [`enable_codec`] left it: the DAC powered down and its path to the
+    /// amplifier cut, or both restored.
+    ///
+    /// Turn it off before the I2S stream's clock stops (in a light sleep,
+    /// say): the codec clocks itself from that stream, and the clock stopping
+    /// and starting clicks in the speaker. Turn it back on once the stream
+    /// runs again.
+    ///
+    /// # Errors
+    ///
+    /// If the codec doesn't answer.
+    pub fn set_output(&mut self, on: bool) -> Result<(), Error> {
+        // On: the DAC first, then the path; off the other way round.
+        if on {
+            self.write(&[[0x12, 0x00], [0x13, 0x10]])
+        } else {
+            self.write(&[[0x13, 0x00], [0x12, 0x02]])
+        }
+    }
+
+    /// Writes each `[register, value]` in turn.
+    fn write(&mut self, writes: &[[u8; 2]]) -> Result<(), Error> {
+        use embedded_hal::i2c::I2c as _;
+        writes.iter().try_for_each(|write| {
+            self.device
+                .write(ES8311, write)
+                .map_err(|_| Error::Codec)
+        })
+    }
+}
+
+/// Turns on the ES8311's DAC path to the amplifier, at 0 dB, and returns
+/// the [`Codec`] to change its level and output. Its master clock comes from
+/// the I2S bit clock (the board has no MCLK line), so the [`speaker`] stream
+/// must be running. The sequence is M5Unified's Cardputer ADV speaker
+/// enable, as espp's driver uses it.
 ///
 /// # Errors
 ///
 /// If the codec doesn't answer.
-pub fn enable_codec(bus: &'static I2cBus) -> Result<(), Error> {
-    use embedded_hal::i2c::I2c as _;
-    const INIT: [[u8; 2]; 8] = [
+pub fn enable_codec(bus: &'static I2cBus) -> Result<Codec, Error> {
+    let mut codec = Codec {
+        device: CriticalSectionDevice::new(bus),
+    };
+    codec.write(&[
         [0x00, 0x80], // reset: power on, state machine enabled
         [0x01, 0xB5], // clock manager: MCLK from BCLK, DAC clocks on
         [0x02, 0x18], // clock manager: MCLK = BCLK × 8 (256 fs at 32 bits a frame)
@@ -1013,31 +1110,8 @@ pub fn enable_codec(bus: &'static I2cBus) -> Result<(), Error> {
         [0x13, 0x10], // system: output to the amplifier on
         [ES8311_DAC_VOLUME, 0xBF], // DAC volume: 0 dB
         [0x37, 0x08], // DAC equalizer bypassed
-    ];
-    let mut codec = CriticalSectionDevice::new(bus);
-    for write in INIT {
-        codec.write(ES8311, &write).map_err(|_| Error::Codec)?;
-    }
-    Ok(())
-}
-
-/// The ES8311's DAC volume register: 0x00 is −95.5 dB, 0xBF is 0 dB, in
-/// 0.5 dB steps.
-const ES8311_DAC_VOLUME: u8 = 0x32;
-
-/// Sets the speaker's level, 0 (silent, −95.5 dB) to 100 (0 dB, the level
-/// [`enable_codec`] starts at), evenly in decibels. The codec must be on.
-///
-/// # Errors
-///
-/// If the codec doesn't answer.
-pub fn set_volume(bus: &'static I2cBus, percent: u8) -> Result<(), Error> {
-    use embedded_hal::i2c::I2c as _;
-    let step = u16::from(percent.min(100)) * 0xBF / 100;
-    let register = u8::try_from(step).unwrap_or(0xBF);
-    CriticalSectionDevice::new(bus)
-        .write(ES8311, &[ES8311_DAC_VOLUME, register])
-        .map_err(|_| Error::Codec)
+    ])?;
+    Ok(codec)
 }
 
 /// The peripherals the battery measurement uses.
@@ -1069,6 +1143,22 @@ impl Battery {
             .sum();
         u16::try_from(sum / BATTERY_SAMPLES * 2).unwrap_or(u16::MAX)
     }
+
+    /// The charge left, in percent, estimated from [`millivolts`](Self::millivolts)
+    /// ([`battery_percent`]). Reads high on USB, where it can't be told from
+    /// charging.
+    pub fn percent(&mut self) -> u8 {
+        battery_percent(self.millivolts())
+    }
+}
+
+/// The charge left in percent for the battery at `millivolts`: M5Stack's
+/// estimate for the Cardputer (M5Unified's `Power_Class::getBatteryLevel`),
+/// 3.30 V empty, 4.10 V full, linear in between.
+#[must_use]
+pub fn battery_percent(millivolts: u16) -> u8 {
+    let level = (i32::from(millivolts) - 3300) * 100 / 800;
+    u8::try_from(level.clamp(0, 100)).unwrap_or(100)
 }
 
 /// Sets up the battery measurement: ADC1 with the chip's calibration curve,

@@ -6,16 +6,19 @@ Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/C
 - `frame_display(DisplayPins, dma)` sets up the same LCD to be fed from a `Frame`: a 240×135 RGB565 framebuffer (64.8 kB, kept in a static) that you draw into with embedded-graphics. `FrameDisplay::flush(&mut frame).await` then sends it by DMA, so other tasks run meanwhile.
   - Only pixels whose colour changed are sent: each run of changed rows goes as one rectangle, as wide as its changes. Redrawing the whole frame every time is fine.
   - A whole frame takes 13 ms at 40 MHz. Drawing straight to the panel through `display` sends a frame in about 28 ms, converting pixel by pixel.
+  - `FrameDisplay::set_asleep(true).await` puts the panel's controller to sleep (a few µA instead of a few mA) with the picture kept in its memory; `set_asleep(false)` wakes it. Turn the backlight off first.
 - `keyboard(KeyboardPins)` sets up the 56-key TCA8418 keyboard on I2C, with Shift and Fn layers from [cardputer-adv-keyboard](https://crates.io/crates/cardputer-adv-keyboard). Fn + `;` `.` `,` `/` gives the arrow keys.
 - `Keyboard::wait_inputs().await` sleeps until the TCA8418 pulls its interrupt line (GPIO11) low, then returns the keys pressed.
   - It waits for the low level, not an edge, so events that arrive while you're busy aren't lost.
   - A 1 s fallback poll covers a missed interrupt; `missed_interrupts()` counts how often that poll was needed.
+  - `Keyboard::listen_for_wake()`, just before esp-hal's `LowPower::sleep_light`, makes a key press end the light sleep; `wait_inputs` then reads the key.
 - `imu(&I2cBus)` finds the BMI270 motion sensor (at 0x68 or 0x69), uploads its configuration through [bmi2](https://crates.io/crates/bmi2) and turns on its accelerometer at ±8 g and 100 Hz. `Imu::acceleration()` reads it in milli-g.
-- `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `enable_codec(&I2cBus)` then turns on the codec's DAC path to the NS4150B amplifier, and `set_volume(&I2cBus, percent)` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
+- `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `enable_codec(&I2cBus)` then turns on the codec's DAC path to the NS4150B amplifier and returns a `Codec`, whose `set_volume(percent)` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
   - The buffer holds 23 ms. If `fill` falls further behind, the stream restarts on silence, so the sound skips rather than stops.
+  - `Codec::set_output(false)` powers the codec's DAC and its path to the amplifier down, and `set_output(true)` brings them back. Turn it off before the I2S clock stops (in a light sleep): the codec clocks itself from the stream, and the clock stopping and starting clicks in the speaker.
   - To avoid skips while anything else holds the CPU for longer (drawing a frame straight to the panel takes about 30 ms), run the speaker on a higher-priority executor, such as esp-rtos's `InterruptExecutor`.
 - `i2c(I2cPins)` sets up the I2C bus that the keyboard, codec and motion sensor share. Pass it to `keyboard_on`, `imu` and `enable_codec`. `keyboard(KeyboardPins)` sets the bus up itself, for when the keyboard is all you need.
-- `battery(BatteryPins)` measures the battery voltage (`Battery::millivolts()`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does. The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
+- `battery(BatteryPins)` measures the battery voltage (`Battery::millivolts()`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does, and `Battery::percent()` the charge left, by M5Unified's estimate (3.30 V empty, 4.10 V full). The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
 
 ```rust
 use cardputer_adv::{DisplayPins, KeyboardPins};
@@ -49,8 +52,8 @@ let mut speaker = cardputer_adv::speaker(SpeakerPins {
     i2s: p.I2S0, dma: p.DMA_CH0, bclk: p.GPIO41, ws: p.GPIO43, dout: p.GPIO42,
 })?;
 // …and once it's running (the codec clocks itself from the stream):
-cardputer_adv::enable_codec(bus)?;
-cardputer_adv::set_volume(bus, 60)?;
+let mut codec = cardputer_adv::enable_codec(bus)?;
+codec.set_volume(60)?;
 let Err(error) = speaker.run(|samples| samples.fill(0)).await; // runs until it fails
 ```
 
@@ -71,6 +74,40 @@ loop {
 }
 ```
 
+## Requirements
+
+- esp-hal 1.2, with its `unstable` feature (LEDC, I2S and light sleep are behind it), on an ESP32-S3.
+- An embassy-time driver, for the async parts (`Keyboard::wait_inputs`, `FrameDisplay::flush`, `Speaker::run`): esp-rtos's, say.
+- `Display` is a [mipidsi](https://crates.io/crates/mipidsi) type; the crate re-exports `mipidsi`, so you can name its types without depending on it yourself.
+
+## Sleeping while the screen is dark
+
+The ESP32-S3 can light-sleep (about 1 mA) and carry on where it left off, woken by a key. In this order, with esp-hal's `LowPower`:
+
+```rust
+use esp_hal::rtc_cntl::sleep::{LowPower, RtcSleepConfig};
+
+let mut low_power = LowPower::new(p.LPWR);
+
+// Going dark:
+backlight.set_percent(0)?;
+display.set_asleep(true).await?; // the panel controller sleeps, keeping its picture
+codec.set_output(false)?;        // before the I2S clock stops, or the speaker clicks
+
+// Each time round while dark:
+keyboard.listen_for_wake();      // a key press ends the sleep
+low_power.set_wakeup_deadline(esp_hal::time::Instant::now() + Duration::from_millis(250));
+low_power.sleep_light(RtcSleepConfig::default()); // returns at the key, or the deadline
+// …look at the motion sensor, say, then read keys with wait_inputs as usual.
+
+// Lighting up again:
+display.set_asleep(false).await?;
+codec.set_output(true)?;
+backlight.set_percent(100)?;
+```
+
+While the chip sleeps its USB is off (no log, no flashing until it wakes), and the embassy clock stops. The speaker's stream runs dry and restarts on silence by itself.
+
 ## Pins
 
 | Function | GPIO |
@@ -87,6 +124,10 @@ The I2C bus is a `critical_section::Mutex`, shared by embedded-hal-bus's `Critic
 ## Status
 
 The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). The display and the keyboard, including its interrupt line, work on a Cardputer ADV (tested October 2026). So do the motion sensor and the speaker. `imu` tries the BMI270's two addresses, 0x68 then 0x69, because sources disagree on which one the ADV uses (espp says 0x68, oxstack 0x69). The ES8311 sequence is M5Unified's Cardputer ADV speaker enable, as [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver uses it. The battery reading is new and not yet checked against a multimeter.
+
+## Documentation
+
+docs.rs can't build for Xtensa, so the API docs aren't there: build them with the esp toolchain (`cargo +esp doc --target xtensa-esp32s3-none-elf`), or read this README and the source.
 
 ## Licence
 
