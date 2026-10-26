@@ -1,0 +1,3 @@
+# The Xtensa toolchain, from espup.
+[toolchain]
+channel = "esp"

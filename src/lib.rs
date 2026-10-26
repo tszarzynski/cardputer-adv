@@ -33,6 +33,11 @@
 
 #![no_std]
 #![warn(missing_docs)]
+#![expect(
+    clippy::future_not_send,
+    reason = "esp-hal's async drivers aren't Send; embassy polls a future on the executor that \
+              made it"
+)]
 
 use core::{cell::RefCell, convert::Infallible, fmt};
 
@@ -156,8 +161,10 @@ impl fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
-/// The LCD backlight, dimmable: PWM at 256 Hz from LEDC low-speed channel
-/// 0, as M5Stack's M5GFX drives it on the Cardputer. Its LED driver can't
+/// The LCD backlight, dimmable by PWM.
+///
+/// It's 256 Hz from LEDC low-speed channel 0, as M5Stack's M5GFX drives it
+/// on the Cardputer. Its LED driver can't
 /// follow fast PWM: at 24 kHz, 15% duty looked off. GPIO38 also powers the
 /// RGB LED, which dims with it.
 pub struct Backlight {
@@ -351,6 +358,10 @@ impl Frame {
     /// A black frame, all of it still to be sent (the panel starts with
     /// whatever its memory held).
     #[must_use]
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "made at compile time, into a static (see above)"
+    )]
     pub const fn new() -> Self {
         Self {
             pixels: [0; W * H],
@@ -810,7 +821,8 @@ const KEYBOARD_RETRY_MS: u32 = 20;
 ///
 /// # Errors
 ///
-/// If the TCA8418 can't be set up, after [`KEYBOARD_TRIES`] tries.
+/// If the TCA8418 can't be set up, after five tries (it can miss the first
+/// transfers right after a flash or a reset).
 pub fn keyboard_on(bus: &'static I2cBus, interrupt: GPIO11<'static>) -> Result<Keyboard, Error> {
     let set_up = || -> Result<keys::Keyboard<I2cDevice>, Error> {
         let mut keys =
@@ -1090,7 +1102,9 @@ impl Codec {
 }
 
 /// Turns on the ES8311's DAC path to the amplifier, at 0 dB, and returns
-/// the [`Codec`] to change its level and output. Its master clock comes from
+/// the [`Codec`] to change its level and output.
+///
+/// Its master clock comes from
 /// the I2S bit clock (the board has no MCLK line), so the [`speaker`] stream
 /// must be running. The sequence is M5Unified's Cardputer ADV speaker
 /// enable, as espp's driver uses it.

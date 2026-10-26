@@ -1,0 +1,2 @@
+# M5Stack's names for its board, graphics and support libraries, as prose.
+doc-valid-idents = ["M5Stack", "M5GFX", "M5Unified", ".."]

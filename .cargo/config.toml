@@ -1,0 +1,6 @@
+# The crate builds only for the Cardputer's ESP32-S3.
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[unstable]
+build-std = ["core"]
