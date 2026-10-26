@@ -37,9 +37,6 @@
 use core::{cell::RefCell, convert::Infallible, fmt};
 
 pub use cardputer_adv_keyboard as keys;
-/// The display driver [`Display`] comes from, so its types can be named
-/// without matching its version.
-pub use mipidsi;
 use critical_section::Mutex;
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
@@ -57,18 +54,18 @@ use embedded_hal_bus::{
 };
 use esp_hal::{
     Async, Blocking,
-    delay::Delay,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation},
+    delay::Delay,
+    dma::DmaTxStreamBuf,
+    dma_tx_stream_buffer,
     gpio::{DriveMode, Event, Input, InputConfig, Level, Output, OutputConfig, Pull},
+    i2c::master::{Config as I2cConfig, I2c},
+    i2s::master::{Channels, DataFormat, I2s, I2sTxDmaTransfer, TdmConfig},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
         channel::{self, ChannelIFace},
         timer::{self, TimerIFace},
     },
-    dma::DmaTxStreamBuf,
-    dma_tx_stream_buffer,
-    i2c::master::{Config as I2cConfig, I2c},
-    i2s::master::{Channels, DataFormat, I2s, I2sTxDmaTransfer, TdmConfig},
     peripherals::{
         ADC1, DMA_CH0, GPIO8, GPIO9, GPIO10, GPIO11, GPIO33, GPIO34, GPIO35, GPIO36, GPIO37,
         GPIO38, GPIO41, GPIO42, GPIO43, I2C0, I2S0, LEDC, SPI2,
@@ -79,6 +76,9 @@ use esp_hal::{
     },
     time::Rate,
 };
+/// The display driver [`Display`] comes from, so its types can be named
+/// without matching its version.
+pub use mipidsi;
 use mipidsi::{
     Builder,
     interface::{Interface, InterfacePixelFormat, SpiInterface},
@@ -245,7 +245,10 @@ fn spi_config() -> SpiConfig {
 const PANEL_OFFSET: (u16, u16) = (52, 40);
 
 /// Initialises the panel in landscape (keyboard below), colours inverted.
-fn init_panel<DI, RST>(interface: DI, reset: RST) -> Result<mipidsi::Display<DI, ST7789, RST>, Error>
+fn init_panel<DI, RST>(
+    interface: DI,
+    reset: RST,
+) -> Result<mipidsi::Display<DI, ST7789, RST>, Error>
 where
     DI: Interface,
     Rgb565: InterfacePixelFormat<DI::Word>,
@@ -540,9 +543,7 @@ impl FrameDisplay {
     /// If the SPI transfer fails.
     pub async fn set_asleep(&mut self, asleep: bool) -> Result<(), Error> {
         self.cs.set_low();
-        let sent = self
-            .command(if asleep { SLPIN } else { SLPOUT }, &[])
-            .await;
+        let sent = self.command(if asleep { SLPIN } else { SLPOUT }, &[]).await;
         self.cs.set_high();
         Timer::after(Duration::from_millis(5)).await;
         sent
@@ -731,7 +732,10 @@ impl Keyboard {
             let mut events = events.peekable();
             let any_event = events.peek().is_some();
             let mut inputs = [None; MAX_INPUTS];
-            for (slot, input) in inputs.iter_mut().zip(events.filter_map(|event| event.input)) {
+            for (slot, input) in inputs
+                .iter_mut()
+                .zip(events.filter_map(|event| event.input))
+            {
                 *slot = Some(input);
             }
             if !any_event {
@@ -881,14 +885,13 @@ pub fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
                 address,
                 Burst::new(IMU_BURST),
             );
-            bmi.get_chip_id()
-                .is_ok_and(|id| id == 0x24)
-                .then_some(bmi)
+            bmi.get_chip_id().is_ok_and(|id| id == 0x24).then_some(bmi)
         })
         .ok_or(Error::Imu)?;
     bmi.init(&config::BMI270_CONFIG_FILE)
         .map_err(|_| Error::Imu)?;
-    bmi.set_acc_range(AccRange::Range8g).map_err(|_| Error::Imu)?;
+    bmi.set_acc_range(AccRange::Range8g)
+        .map_err(|_| Error::Imu)?;
     bmi.set_acc_conf(AccConf {
         odr: Odr::Odr100,
         bwp: AccBwp::NormAvg4,
@@ -1080,11 +1083,9 @@ impl Codec {
     /// Writes each `[register, value]` in turn.
     fn write(&mut self, writes: &[[u8; 2]]) -> Result<(), Error> {
         use embedded_hal::i2c::I2c as _;
-        writes.iter().try_for_each(|write| {
-            self.device
-                .write(ES8311, write)
-                .map_err(|_| Error::Codec)
-        })
+        writes
+            .iter()
+            .try_for_each(|write| self.device.write(ES8311, write).map_err(|_| Error::Codec))
     }
 }
 
@@ -1102,14 +1103,14 @@ pub fn enable_codec(bus: &'static I2cBus) -> Result<Codec, Error> {
         device: CriticalSectionDevice::new(bus),
     };
     codec.write(&[
-        [0x00, 0x80], // reset: power on, state machine enabled
-        [0x01, 0xB5], // clock manager: MCLK from BCLK, DAC clocks on
-        [0x02, 0x18], // clock manager: MCLK = BCLK × 8 (256 fs at 32 bits a frame)
-        [0x0D, 0x01], // system: analog circuits on
-        [0x12, 0x00], // system: DAC on
-        [0x13, 0x10], // system: output to the amplifier on
+        [0x00, 0x80],              // reset: power on, state machine enabled
+        [0x01, 0xB5],              // clock manager: MCLK from BCLK, DAC clocks on
+        [0x02, 0x18],              // clock manager: MCLK = BCLK × 8 (256 fs at 32 bits a frame)
+        [0x0D, 0x01],              // system: analog circuits on
+        [0x12, 0x00],              // system: DAC on
+        [0x13, 0x10],              // system: output to the amplifier on
         [ES8311_DAC_VOLUME, 0xBF], // DAC volume: 0 dB
-        [0x37, 0x08], // DAC equalizer bypassed
+        [0x37, 0x08],              // DAC equalizer bypassed
     ])?;
     Ok(codec)
 }
@@ -1166,10 +1167,8 @@ pub fn battery_percent(millivolts: u16) -> u8 {
 #[must_use]
 pub fn battery(pins: BatteryPins) -> Battery {
     let mut config = AdcConfig::new();
-    let pin = config.enable_pin_with_cal::<_, AdcCalCurve<ADC1<'static>>>(
-        pins.pin,
-        Attenuation::_11dB,
-    );
+    let pin =
+        config.enable_pin_with_cal::<_, AdcCalCurve<ADC1<'static>>>(pins.pin, Attenuation::_11dB);
     Battery {
         adc: Adc::new(pins.adc, config),
         pin,
