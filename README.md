@@ -2,6 +2,28 @@
 
 Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/Cardputer-Adv) (ESP32-S3) on [esp-hal](https://github.com/esp-rs/esp-hal) 1.x.
 
+## Hardware
+
+What the Cardputer ADV has, and what this crate covers so far.
+
+| Part | Status | API |
+|---|---|---|
+| LCD, 1.14" ST7789V2, 240×135 | ✅ drawing directly, or a framebuffer sent by DMA; the controller's sleep | `display`, `frame_display`, `Frame`, `FrameDisplay::flush`, `FrameDisplay::set_asleep` |
+| Backlight (GPIO38) | ✅ dimmable, 0–100% | `Backlight::set_percent` |
+| Keyboard, 56 keys (TCA8418) | ✅ Shift and Fn layers, interrupt-driven, wakes the chip from light sleep | `keyboard`, `keyboard_on`, `Keyboard::wait_inputs`, `Keyboard::listen_for_wake` |
+| Motion sensor (BMI270) | ✅ accelerometer, ±8 g at 100 Hz; ❌ gyroscope, motion interrupts | `imu`, `Imu::acceleration` |
+| Speaker (ES8311 codec, NS4150B amplifier) | ✅ playing samples at 44.1 kHz, volume, output off for sleep | `speaker`, `Speaker::run`, `enable_codec`, `Codec` |
+| Battery (GPIO10) | ✅ voltage and estimated charge; charging can't be detected (no line for it) | `battery`, `Battery::millivolts`, `Battery::percent` |
+| Shared I2C bus (keyboard, codec, motion sensor) | ✅ | `i2c` |
+| Microphone (through the ES8311, I2S in on GPIO46) | ❌ | |
+| microSD slot (SPI: CS 12, MOSI 14, CLK 40, MISO 39) | ❌ | |
+| IR transmitter (GPIO44) | ❌ | |
+| RGB LED | ❌ (it's powered through GPIO38, so it dims with the backlight) | |
+| G0 button, after boot | ❌ (a plain input on GPIO0) | |
+| Grove port (GPIO1, 2) and EXT header | not board-specific: use esp-hal directly | |
+
+## API
+
 - `display(DisplayPins)` sets up the 1.14" ST7789V2 LCD and turns the backlight on. You get it back as a 240×135 RGB565 [embedded-graphics](https://docs.rs/embedded-graphics) `DrawTarget`, in landscape with the keyboard below, and a `Backlight`. It draws straight to the panel, so each shape shows as it's drawn. `Backlight::set_percent` dims it with 256 Hz PWM on LEDC (as M5GFX does; the LED driver doesn't follow fast PWM); the RGB LED, on the same pin, dims too.
 - `frame_display(DisplayPins, dma)` sets up the same LCD to be fed from a `Frame`: a 240×135 RGB565 framebuffer (64.8 kB, kept in a static) that you draw into with embedded-graphics. `FrameDisplay::flush(&mut frame).await` then sends it by DMA, so other tasks run meanwhile.
   - Only pixels whose colour changed are sent: each run of changed rows goes as one rectangle, as wide as its changes. Redrawing the whole frame every time is fine.
@@ -131,4 +153,11 @@ docs.rs can't build for Xtensa, so the API docs aren't there: build them with th
 
 ## Licence
 
-MIT OR Apache-2.0.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT licence ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 licence, shall be dual licensed as above, without any additional terms or conditions.
