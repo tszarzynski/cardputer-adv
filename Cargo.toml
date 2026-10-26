@@ -8,6 +8,8 @@ license = "MIT OR Apache-2.0"
 keywords = ["cardputer", "m5stack", "esp32s3", "esp-hal", "no-std"]
 categories = ["embedded", "hardware-support", "no-std"]
 readme = "README.md"
+# The crate itself; the repo's tooling (Justfile, toolchain, CLAUDE.md) stays out.
+include = ["src/**", "README.md", "CHANGELOG.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
 # The lints both apps use.
 [lints.clippy]
