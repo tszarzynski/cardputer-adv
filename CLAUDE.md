@@ -1,11 +1,11 @@
 # Working in this repo
 
-`cardputer-adv` is board support for the M5Stack Cardputer ADV (ESP32-S3) on esp-hal. Two apps use it: [backgammon](../backgammon) and [chord-detector](../chord-detector), each by path (`../cardputer-adv`) while it's developed alongside them. The API is in [README.md](README.md); changes go in [CHANGELOG.md](CHANGELOG.md).
+`cardputer-adv` is board support for the M5Stack Cardputer ADV (ESP32-S3) on esp-hal. Two apps use it from crates.io: [backgammon](../backgammon) and [chord-detector](../chord-detector). To try a change in them before it's published, each takes a local, uncommitted `[patch.crates-io]` with the path to this repo (their CLAUDE.md or firmware `Cargo.toml` say where). The API is in [README.md](README.md); changes go in [CHANGELOG.md](CHANGELOG.md).
 
 ## Before committing
 
 - `just` (fmt check, and clippy for the Xtensa target with no features and with all of them, and on the example) must pass, and `just build` and `just doc` (warnings are errors). CI (`.github/workflows/ci.yml`) runs the same recipes, plus `just package`, and publishes the docs to GitHub Pages from `main`.
-- Then build both apps against the change: `just build` and `just clippy` in backgammon, `just cardputer build` and `just cardputer clippy` in chord-detector. A breaking change updates their call sites in the same session.
+- Then build both apps against the change, with that local `[patch.crates-io]` in each: `just build` and `just clippy` in backgammon, `just cardputer build` and `just cardputer clippy` in chord-detector. A breaking change updates their call sites in the same session.
 - Hardware behaviour can only be checked on a Cardputer: `just hardware` flashes `examples/hardware.rs`, which tries each part and logs what it does, or flash one of the apps. A new part gets a line in that example.
 
 ## Conventions
