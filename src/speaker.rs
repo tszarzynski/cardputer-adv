@@ -135,7 +135,7 @@ impl Speaker {
 
 /// Starts the I2S stream to the codec (16-bit stereo at [`SAMPLE_RATE`]),
 /// playing silence. The codec takes its clock from it, so call
-/// [`enable_codec`] once this is running.
+/// [`codec`] once this is running.
 ///
 /// # Errors
 ///
@@ -145,7 +145,7 @@ impl Speaker {
 ///
 /// If called twice (its DMA buffer is static).
 ///
-/// [`enable_codec`]: crate::enable_codec
+/// [`codec`]: crate::codec
 pub fn speaker(pins: SpeakerPins) -> Result<Speaker, Error> {
     let i2s = I2s::new(pins.i2s, pins.dma, i2s_config())
         .map_err(|_| Error::Speaker)?

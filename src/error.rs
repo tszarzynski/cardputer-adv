@@ -9,7 +9,7 @@ use core::fmt;
 #[non_exhaustive]
 pub enum Error {
     /// The LCD's SPI bus couldn't be configured.
-    Spi,
+    DisplaySpi,
     /// The I2C bus couldn't be configured.
     I2c,
     /// The LCD didn't take its initialisation sequence.
@@ -42,7 +42,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Spi => "LCD SPI bus setup failed",
+            Self::DisplaySpi => "LCD SPI bus setup failed",
             Self::I2c => "I2C bus setup failed",
             Self::DisplayInit => "LCD initialisation failed",
             Self::Keyboard => "keyboard controller (TCA8418) not answering",

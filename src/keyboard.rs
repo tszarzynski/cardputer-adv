@@ -8,7 +8,7 @@ use embedded_hal_bus::i2c::CriticalSectionDevice;
 use esp_hal::{
     delay::Delay,
     gpio::{Event, Input, InputConfig, Pull},
-    peripherals::{GPIO8, GPIO9, GPIO11, I2C0},
+    peripherals::GPIO11,
 };
 
 use crate::{Error, I2cBus, I2cDevice, I2cPins, i2c, keys};
@@ -17,11 +17,7 @@ use crate::{Error, I2cBus, I2cDevice, I2cPins, i2c, keys};
 #[derive(Debug)]
 pub struct KeyboardPins {
     /// The I2C bus it shares (set up by [`keyboard`]).
-    pub i2c: I2C0<'static>,
-    /// I2C data.
-    pub sda: GPIO8<'static>,
-    /// I2C clock.
-    pub scl: GPIO9<'static>,
+    pub i2c: I2cPins,
     /// The TCA8418's interrupt output (active low).
     pub interrupt: GPIO11<'static>,
 }
@@ -146,11 +142,7 @@ impl Keyboard {
 ///
 /// If the bus was already set up (by an earlier call, or [`i2c`]).
 pub fn keyboard(pins: KeyboardPins) -> Result<Keyboard, Error> {
-    let bus = i2c(I2cPins {
-        i2c: pins.i2c,
-        sda: pins.sda,
-        scl: pins.scl,
-    })?;
+    let bus = i2c(pins.i2c)?;
     keyboard_on(bus, pins.interrupt)
 }
 

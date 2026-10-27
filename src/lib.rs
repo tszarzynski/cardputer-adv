@@ -11,7 +11,7 @@
 //!   its gyroscope, in milli-degrees a second.
 //! - [`speaker`]: the speaker, fed with samples over I2S (the ES8311 codec,
 //!   then an NS4150B amplifier). [`audio`] starts it with the microphone,
-//!   as an [`Audio`]. [`enable_codec`] turns the codec on and returns the
+//!   as an [`Audio`]. [`codec`] turns the codec on and returns the
 //!   [`Codec`], which sets its level, and turns its output and the
 //!   microphone off and on.
 //! - [`i2c`]: the I2C bus the keyboard, the codec and the motion sensor
@@ -24,6 +24,10 @@
 //!   [`ir_transmitter`] (NEC codes).
 //! - `sd_card` (with the `sd-card` feature): the microSD card, through
 //!   [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc).
+//!
+//! Each part's pins come out of esp-hal's `Peripherals` with a macro named
+//! after it, [`display_pins!`], [`keyboard_pins!`] and so on; only those
+//! fields move, so the rest stays usable.
 //!
 //! The async parts need an embassy-time driver, such as esp-rtos's.
 //!
@@ -63,6 +67,7 @@ mod ir;
 mod keyboard;
 mod led;
 mod microphone;
+mod pins;
 mod remote;
 #[cfg(feature = "sd-card")]
 mod sd_card;
@@ -75,7 +80,7 @@ pub use button::{Button, button};
 ///
 /// [cardputer-adv-keyboard]: https://crates.io/crates/cardputer-adv-keyboard
 pub use cardputer_adv_keyboard as keys;
-pub use codec::{Codec, enable_codec};
+pub use codec::{Codec, codec};
 pub use display::{Backlight, Display, DisplayPins, HEIGHT, WIDTH, display};
 /// The microSD card's FAT file system and driver, at the version
 /// [`SdCard`] uses.

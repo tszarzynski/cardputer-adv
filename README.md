@@ -12,7 +12,7 @@ What the Cardputer ADV has, and what this crate covers so far.
 | Backlight (GPIO38) | ✅ dimmable, 0–100% | `Backlight::set_percent` |
 | Keyboard, 56 keys (TCA8418) | ✅ Shift and Fn layers, interrupt-driven, wakes the chip from light sleep | `keyboard`, `keyboard_on`, `Keyboard::wait_inputs`, `Keyboard::listen_for_wake` |
 | Motion sensor (BMI270) | ✅ accelerometer, ±8 g at 100 Hz; gyroscope, ±2000 °/s at 100 Hz; ❌ motion interrupts | `imu`, `Imu::acceleration`, `Imu::set_gyroscope`, `Imu::rotation` |
-| Speaker (ES8311 codec, NS4150B amplifier) | ✅ playing samples at 44.1 kHz, volume, output off for sleep | `speaker`, `Speaker::run`, `enable_codec`, `Codec` |
+| Speaker (ES8311 codec, NS4150B amplifier) | ✅ playing samples at 44.1 kHz, volume, output off for sleep | `speaker`, `Speaker::run`, `codec`, `Codec` |
 | Microphone (through the ES8311, I2S in on GPIO46) | ✅ recording at 44.1 kHz, alongside the speaker; preamp gain | `audio`, `Audio::run`, `Codec::set_microphone`, `Codec::set_microphone_gain` |
 | Battery (GPIO10) | ✅ voltage and estimated charge; charging can't be detected (no line for it) | `battery`, `Battery::millivolts`, `Battery::percent` |
 | Shared I2C bus (keyboard, codec, motion sensor) | ✅ | `i2c` |
@@ -35,30 +35,26 @@ What the Cardputer ADV has, and what this crate covers so far.
   - A 1 s fallback poll covers a missed interrupt; `missed_interrupts()` counts how often that poll was needed.
   - `Keyboard::listen_for_wake()`, just before esp-hal's `LowPower::sleep_light`, makes a key press end the light sleep; `wait_inputs` then reads the key.
 - `imu(&I2cBus)` finds the BMI270 motion sensor (at 0x68 or 0x69), uploads its configuration through [bmi2](https://crates.io/crates/bmi2) and turns on its accelerometer at ±8 g and 100 Hz. `Imu::acceleration()` reads it in milli-g.
-- `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `enable_codec(&I2cBus)` then turns on the codec's DAC path to the NS4150B amplifier and returns a `Codec`, whose `set_volume(percent)` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
+- `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `codec(&I2cBus)` then turns on the codec's DAC path to the NS4150B amplifier and returns a `Codec`, whose `set_volume(percent)` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
   - The buffer holds 23 ms. If `fill` falls further behind, the stream restarts on silence, so the sound skips rather than stops.
   - `Codec::set_output(false)` powers the codec's DAC and its path to the amplifier down, and `set_output(true)` brings them back. Turn it off before the I2S clock stops (in a light sleep): the codec clocks itself from the stream, and the clock stopping and starting clicks in the speaker.
   - To avoid skips while anything else holds the CPU for longer (drawing a frame straight to the panel takes about 30 ms), run the speaker on a higher-priority executor, such as esp-rtos's `InterruptExecutor`.
-- `i2c(I2cPins)` sets up the I2C bus that the keyboard, codec and motion sensor share. Pass it to `keyboard_on`, `imu` and `enable_codec`. `keyboard(KeyboardPins)` sets the bus up itself, for when the keyboard is all you need.
-- `audio(AudioPins)` starts the speaker's stream and the microphone's together, on the same I2S clocks, and returns an `Audio`. Once `enable_codec` has set the codec up, `Codec::set_microphone(true)` turns its ADC on, and `Codec::set_microphone_gain(db)` sets its preamp (0–30 dB, in 3 dB steps). `Audio::run(fill, take).await` plays what `fill` writes and hands what's heard to `take`, up to 256 mono samples at a time; the two run together because the microphone runs on the speaker's clocks. A stream that falls more than 23 ms behind restarts, so its sound has a gap.
+- `i2c(I2cPins)` sets up the I2C bus that the keyboard, codec and motion sensor share. Pass it to `keyboard_on`, `imu` and `codec`. `keyboard(KeyboardPins)` sets the bus up itself, for when the keyboard is all you need.
+- `audio(AudioPins)` starts the speaker's stream and the microphone's together, on the same I2S clocks, and returns an `Audio`. Once `codec` has set the codec up, `Codec::set_microphone(true)` turns its ADC on, and `Codec::set_microphone_gain(db)` sets its preamp (0–30 dB, in 3 dB steps). `Audio::run(fill, take).await` plays what `fill` writes and hands what's heard to `take`, up to 256 mono samples at a time; the two run together because the microphone runs on the speaker's clocks. A stream that falls more than 23 ms behind restarts, so its sound has a gap.
 - `Imu::set_gyroscope(true)` turns the BMI270's gyroscope on (±2000 °/s at 100 Hz; it draws about 0.9 mA, so `imu` leaves it off), and `Imu::rotation()` reads it in milli-degrees a second.
 - `rmt(RMT)` sets up the RMT peripheral for the RGB LED and the IR transmitter; give each one of its transmit channels. `rgb_led(channel, GPIO21)` returns an `RgbLed`, and `RgbLed::set_color(Rgb888).await` sets it (black is off). It's powered through the backlight's switch, so it's lit only while the backlight is, and dims with it.
 - `ir_transmitter(channel, GPIO44)` returns an `IrTransmitter`, which sends NEC codes on a 38 kHz carrier: `send_nec(address, command)`, `send_nec_extended` for a 16-bit address, and `send_nec_repeat` for a held button.
 - `button(GPIO0)` returns the G0 `Button`: `is_pressed()`, `wait_for_press().await` (debounced), and `listen_for_wake()` to wake the chip from light sleep, as `Keyboard::listen_for_wake` does.
 - `sd_card(SdCardPins)`, with the `sd-card` feature, sets up the microSD card's own SPI bus (SPI3) and returns an `SdCard`, an [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc) `BlockDevice`. Read and write FAT files through `embedded_sdmmc::VolumeManager`; the crate re-exports `embedded_sdmmc`, so the versions match. The card is started on first use (at 400 kHz, then run at 20 MHz), and again after a failed access, so it can be inserted or swapped while the app runs. It's blocking, so a long read holds up its executor.
+- Each part's pins come out of esp-hal's `Peripherals` with a macro named after it: `display_pins!(p)`, `i2c_pins!(p)`, `keyboard_pins!(p)`, `speaker_pins!(p)`, `audio_pins!(p)`, `battery_pins!(p)` and `sd_card_pins!(p)`. Only those fields move, so the rest of `p` stays usable. The `…Pins` structs can still be written out by hand.
 - `battery(BatteryPins)` measures the battery voltage (`Battery::millivolts()`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does, and `Battery::percent()` the charge left, by M5Unified's estimate (3.30 V empty, 4.10 V full). The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
 
 ```rust
-use cardputer_adv::{DisplayPins, KeyboardPins};
+use cardputer_adv::{display_pins, keyboard_pins};
 use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
 
-let (mut display, mut backlight) = cardputer_adv::display(DisplayPins {
-    spi: p.SPI2, sck: p.GPIO36, mosi: p.GPIO35, cs: p.GPIO37,
-    dc: p.GPIO34, reset: p.GPIO33, backlight: p.GPIO38, ledc: p.LEDC,
-})?;
-let mut keyboard = cardputer_adv::keyboard(KeyboardPins {
-    i2c: p.I2C0, sda: p.GPIO8, scl: p.GPIO9, interrupt: p.GPIO11,
-})?;
+let (mut display, mut backlight) = cardputer_adv::display(display_pins!(p))?;
+let mut keyboard = cardputer_adv::keyboard(keyboard_pins!(p))?;
 display.clear(Rgb565::BLACK).expect("LCD"); // mipidsi's own error type
 loop {
     for key in keyboard.wait_inputs().await? { /* … */ }
@@ -68,19 +64,17 @@ loop {
 With the motion sensor and the speaker, set the shared bus up first:
 
 ```rust
-use cardputer_adv::{I2cPins, SpeakerPins};
+use cardputer_adv::{i2c_pins, speaker_pins};
 
-let bus = cardputer_adv::i2c(I2cPins { i2c: p.I2C0, sda: p.GPIO8, scl: p.GPIO9 })?;
+let bus = cardputer_adv::i2c(i2c_pins!(p))?;
 let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11)?;
 let mut imu = cardputer_adv::imu(bus)?;
 let [x, y, z] = imu.acceleration()?; // milli-g
 
 // In a task (ideally on a higher-priority executor):
-let mut speaker = cardputer_adv::speaker(SpeakerPins {
-    i2s: p.I2S0, dma: p.DMA_CH0, bclk: p.GPIO41, ws: p.GPIO43, dout: p.GPIO42,
-})?;
+let mut speaker = cardputer_adv::speaker(speaker_pins!(p))?;
 // …and once it's running (the codec clocks itself from the stream):
-let mut codec = cardputer_adv::enable_codec(bus)?;
+let mut codec = cardputer_adv::codec(bus)?;
 codec.set_volume(60)?;
 let Err(error) = speaker.run(|samples| samples.fill(0)).await; // runs until it fails
 ```
@@ -88,12 +82,11 @@ let Err(error) = speaker.run(|samples| samples.fill(0)).await; // runs until it 
 The microphone, the RGB LED and the IR transmitter:
 
 ```rust
-use cardputer_adv::{AudioPins, SpeakerPins};
+use cardputer_adv::audio_pins;
 use embedded_graphics::pixelcolor::{Rgb888, RgbColor};
 
-let speaker = SpeakerPins { i2s: p.I2S0, dma: p.DMA_CH0, bclk: p.GPIO41, ws: p.GPIO43, dout: p.GPIO42 };
-let mut audio = cardputer_adv::audio(AudioPins { speaker, din: p.GPIO46 })?;
-let mut codec = cardputer_adv::enable_codec(bus)?;
+let mut audio = cardputer_adv::audio(audio_pins!(p))?;
+let mut codec = cardputer_adv::codec(bus)?;
 codec.set_microphone_gain(24)?;
 codec.set_microphone(true)?;
 // In a task: silence out, 44.1 kHz mono in.
@@ -114,7 +107,7 @@ use static_cell::ConstStaticCell;
 
 static FRAME: ConstStaticCell<Frame> = ConstStaticCell::new(Frame::new());
 
-let (mut display, _backlight) = cardputer_adv::frame_display(pins, p.DMA_CH1)?;
+let (mut display, _backlight) = cardputer_adv::frame_display(display_pins!(p), p.DMA_CH1)?;
 let frame = FRAME.take();
 loop {
     frame.clear(Rgb565::BLACK)?; // Infallible

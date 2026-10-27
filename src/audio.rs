@@ -70,7 +70,7 @@ impl Audio {
 /// Starts the I2S streams to and from the codec, for the speaker and the
 /// microphone together.
 ///
-/// The speaker plays silence until [`Audio::run`] feeds it. Then call [`enable_codec`], and turn the microphone on with
+/// The speaker plays silence until [`Audio::run`] feeds it. Then call [`codec`], and turn the microphone on with
 /// [`Codec::set_microphone`].
 ///
 /// # Errors
@@ -81,7 +81,7 @@ impl Audio {
 ///
 /// If called twice, or with [`speaker`] (the DMA buffers are static).
 ///
-/// [`enable_codec`]: crate::enable_codec
+/// [`codec`]: crate::codec
 /// [`Codec::set_microphone`]: crate::Codec::set_microphone
 /// [`speaker`]: crate::speaker
 pub fn audio(pins: AudioPins) -> Result<Audio, Error> {

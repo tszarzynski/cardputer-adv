@@ -21,7 +21,7 @@ const ES8311_DAC_POWER: u8 = 0x12;
 const ES8311_OUTPUT: u8 = 0x13;
 
 /// The ES8311's clock manager register, with the DAC's clocks on (as
-/// [`enable_codec`] leaves it), or the ADC's too.
+/// [`codec`] leaves it), or the ADC's too.
 const ES8311_CLOCKS: u8 = 0x01;
 const CLOCKS_DAC: u8 = 0xB5;
 const CLOCKS_DAC_ADC: u8 = 0xBF;
@@ -32,7 +32,7 @@ const ES8311_ADC_PGA: u8 = 0x14;
 const MIC1: u8 = 0x10;
 
 /// The ES8311 codec, its DAC path to the amplifier on: what
-/// [`enable_codec`] returns. Holding one means the codec has been set up,
+/// [`codec`] returns. Holding one means the codec has been set up,
 /// so its level and output can be changed.
 pub struct Codec {
     device: I2cDevice,
@@ -42,7 +42,7 @@ pub struct Codec {
 
 impl Codec {
     /// Sets the speaker's level, 0 (silent, −95.5 dB) to 100 (0 dB, the
-    /// level [`enable_codec`] starts at), evenly in decibels.
+    /// level [`codec`] starts at), evenly in decibels.
     ///
     /// # Errors
     ///
@@ -54,7 +54,7 @@ impl Codec {
     }
 
     /// Turns the output to the amplifier off (`on = false`), or back on as
-    /// [`enable_codec`] left it: the DAC powered down and its path to the
+    /// [`codec`] left it: the DAC powered down and its path to the
     /// amplifier cut, or both restored.
     ///
     /// Turn it off before the I2S stream's clock stops (in a light sleep,
@@ -133,7 +133,7 @@ impl Codec {
 /// If the codec doesn't answer.
 ///
 /// [`speaker`]: crate::speaker
-pub fn enable_codec(bus: &'static I2cBus) -> Result<Codec, Error> {
+pub fn codec(bus: &'static I2cBus) -> Result<Codec, Error> {
     let mut codec = Codec {
         device: CriticalSectionDevice::new(bus),
         microphone_gain: 0,

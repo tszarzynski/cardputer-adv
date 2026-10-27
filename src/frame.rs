@@ -366,14 +366,14 @@ pub fn frame_display(
         pins.spi,
         spi_config().with_min_async_transfer_size(MIN_DMA_TRANSFER),
     )
-    .map_err(|_| Error::Spi)?
+    .map_err(|_| Error::DisplaySpi)?
     .with_sck(pins.sck)
     .with_mosi(pins.mosi)
     .with_dma(dma);
     // mipidsi sets the panel up through borrows, which then end: the
     // flushes drive it directly.
     let mut buffer = [0; 64];
-    let device = ExclusiveDevice::new_no_delay(&mut spi, &mut cs).map_err(|_| Error::Spi)?;
+    let device = ExclusiveDevice::new_no_delay(&mut spi, &mut cs).map_err(|_| Error::DisplaySpi)?;
     init_panel(SpiInterface::new(device, &mut dc, &mut buffer), &mut reset)?;
     Ok((
         FrameDisplay {

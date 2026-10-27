@@ -128,10 +128,10 @@ pub fn display(pins: DisplayPins) -> Result<(Display, Backlight), Error> {
     let reset = Output::new(pins.reset, Level::High, OutputConfig::default());
     let cs = Output::new(pins.cs, Level::High, OutputConfig::default());
     let spi = Spi::new(pins.spi, spi_config())
-        .map_err(|_| Error::Spi)?
+        .map_err(|_| Error::DisplaySpi)?
         .with_sck(pins.sck)
         .with_mosi(pins.mosi);
-    let device = ExclusiveDevice::new_no_delay(spi, cs).map_err(|_| Error::Spi)?;
+    let device = ExclusiveDevice::new_no_delay(spi, cs).map_err(|_| Error::DisplaySpi)?;
     let interface = SpiInterface::new(device, dc, BUFFER.init([0; 512]));
     let display = init_panel(interface, reset)?;
     Ok((display, backlight))

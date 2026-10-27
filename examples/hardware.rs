@@ -12,10 +12,7 @@
     reason = "esp-hal's async drivers aren't Send; each task runs on the executor that made it"
 )]
 
-use cardputer_adv::{
-    AudioPins, Button, DisplayPins, I2cPins, Imu, IrTransmitter, RgbLed, SdCardPins, SpeakerPins,
-    embedded_sdmmc::BlockDevice,
-};
+use cardputer_adv::{AudioPins, Button, Imu, IrTransmitter, RgbLed, embedded_sdmmc::BlockDevice};
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Ticker, Timer};
@@ -53,32 +50,11 @@ async fn main(spawner: Spawner) -> ! {
     info!("hardware test");
 
     // The backlight's switch also powers the RGB LED.
-    let (_display, _backlight) = cardputer_adv::display(DisplayPins {
-        spi: p.SPI2,
-        sck: p.GPIO36,
-        mosi: p.GPIO35,
-        cs: p.GPIO37,
-        dc: p.GPIO34,
-        reset: p.GPIO33,
-        backlight: p.GPIO38,
-        ledc: p.LEDC,
-    })
-    .expect("display");
-    let bus = cardputer_adv::i2c(I2cPins {
-        i2c: p.I2C0,
-        sda: p.GPIO8,
-        scl: p.GPIO9,
-    })
-    .expect("I2C bus");
+    let (_display, _backlight) =
+        cardputer_adv::display(cardputer_adv::display_pins!(p)).expect("display");
+    let bus = cardputer_adv::i2c(cardputer_adv::i2c_pins!(p)).expect("I2C bus");
 
-    let card = cardputer_adv::sd_card(SdCardPins {
-        spi: p.SPI3,
-        sck: p.GPIO40,
-        mosi: p.GPIO14,
-        miso: p.GPIO39,
-        cs: p.GPIO12,
-    })
-    .expect("microSD bus");
+    let card = cardputer_adv::sd_card(cardputer_adv::sd_card_pins!(p)).expect("microSD bus");
     match card.num_blocks() {
         Ok(blocks) => info!("microSD: {} MB", u64::from(blocks.0) * 512 / 1_000_000),
         Err(error) => warn!("microSD: {error:?}"),
@@ -97,21 +73,9 @@ async fn main(spawner: Spawner) -> ! {
     AUDIO_EXECUTOR
         .init(InterruptExecutor::new(p.FROM_CPU_INTR1))
         .start(Priority::Priority2)
-        .spawn(
-            listen(AudioPins {
-                speaker: SpeakerPins {
-                    i2s: p.I2S0,
-                    dma: p.DMA_CH0,
-                    bclk: p.GPIO41,
-                    ws: p.GPIO43,
-                    dout: p.GPIO42,
-                },
-                din: p.GPIO46,
-            })
-            .expect("audio task"),
-        );
+        .spawn(listen(cardputer_adv::audio_pins!(p)).expect("audio task"));
     Timer::after(Duration::from_millis(20)).await;
-    let mut codec = cardputer_adv::enable_codec(bus).expect("codec");
+    let mut codec = cardputer_adv::codec(bus).expect("codec");
     codec.set_microphone_gain(24).expect("microphone gain");
     codec.set_microphone(true).expect("microphone");
     info!("{codec:?}");
