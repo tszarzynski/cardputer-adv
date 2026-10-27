@@ -1,6 +1,6 @@
 //! The motion sensor: a BMI270 on the I2C bus.
 
-use core::fmt;
+use core::{array, fmt};
 
 use bmi2::{
     Bmi2, I2cAddr, config,
@@ -10,6 +10,7 @@ use bmi2::{
         PerfMode, PwrCtrl,
     },
 };
+use embassy_time::{Duration, Timer};
 use embedded_hal_bus::i2c::CriticalSectionDevice;
 use esp_hal::delay::Delay;
 
@@ -21,10 +22,20 @@ const IMU_BURST: u16 = 128;
 /// The BMI270 driver on the shared bus.
 type Bmi270 = Bmi2<I2cInterface<I2cDevice>, Delay, { IMU_BURST as usize }>;
 
+/// How long the gyroscope takes to give its first readings once on.
+const GYROSCOPE_START: Duration = Duration::from_millis(50);
+
+/// How many readings [`Imu::calibrate_gyroscope`] averages, one per
+/// measurement (100 Hz): a third of a second.
+const CALIBRATION_SAMPLES: i32 = 32;
+const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
+
 /// The BMI270: its accelerometer, ±8 g at 100 Hz, and its gyroscope,
 /// ±2000 °/s at 100 Hz once [turned on](Self::set_gyroscope).
 pub struct Imu {
     bmi: Bmi270,
+    /// The gyroscope's raw reading at rest, taken off each reading.
+    gyroscope_offset: [i32; 3],
 }
 
 impl Imu {
@@ -68,17 +79,54 @@ impl Imu {
     }
 
     /// The rotation rate now, in milli-degrees a second, as (x, y, z) about
-    /// the sensor's axes. Zero (or nearly: a few hundred either way) while
-    /// still, and while the [gyroscope](Self::set_gyroscope) is off.
+    /// the sensor's axes.
+    ///
+    /// Uncalibrated, it can read several degrees a second while still (from
+    /// 0.5 to 9 °/s in different runs on the ADV tested); after
+    /// [`calibrate_gyroscope`](Self::calibrate_gyroscope), within a few
+    /// hundred milli-degrees of zero.
     ///
     /// # Errors
     ///
     /// If the sensor can't be read.
     pub fn rotation(&mut self) -> Result<[i32; 3], Error> {
-        let data = self.bmi.get_gyr_data().map_err(|_| Error::Imu)?;
+        let raw = self.gyroscope_raw()?;
         // ±2000 °/s over the i16 range: 16.384 counts per °/s.
-        let mdps = |raw: i16| i32::from(raw) * 15_625 / 256;
-        Ok([mdps(data.x), mdps(data.y), mdps(data.z)])
+        Ok(array::from_fn(|axis| {
+            (raw[axis] - self.gyroscope_offset[axis]) * 15_625 / 256
+        }))
+    }
+
+    /// Measures the gyroscope's offset (what it reads at rest), and takes it
+    /// off [`rotation`](Self::rotation)'s readings from then on. Turns the
+    /// gyroscope on if it isn't.
+    ///
+    /// The Cardputer must lie still meanwhile, about 0.4 s: any turning is
+    /// taken for offset. The offset drifts with temperature, so calibrate
+    /// again if it matters.
+    ///
+    /// # Errors
+    ///
+    /// If the sensor can't be read.
+    pub async fn calibrate_gyroscope(&mut self) -> Result<(), Error> {
+        self.set_gyroscope(true)?;
+        Timer::after(GYROSCOPE_START).await;
+        let mut sum = [0; 3];
+        for _ in 0..CALIBRATION_SAMPLES {
+            Timer::after(SAMPLE_PERIOD).await;
+            let raw = self.gyroscope_raw()?;
+            for (total, value) in sum.iter_mut().zip(raw) {
+                *total += value;
+            }
+        }
+        self.gyroscope_offset = sum.map(|total| total / CALIBRATION_SAMPLES);
+        Ok(())
+    }
+
+    /// The gyroscope's reading, in its counts.
+    fn gyroscope_raw(&mut self) -> Result<[i32; 3], Error> {
+        let data = self.bmi.get_gyr_data().map_err(|_| Error::Imu)?;
+        Ok([data.x, data.y, data.z].map(i32::from))
     }
 
     /// Powers the accelerometer, and the gyroscope if `gyroscope`.
@@ -124,13 +172,18 @@ pub fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
         filter_perf: PerfMode::Perf,
     })
     .map_err(|_| Error::Imu)?;
-    let mut imu = Imu { bmi };
+    let mut imu = Imu {
+        bmi,
+        gyroscope_offset: [0; 3],
+    };
     imu.set_power(false)?;
     Ok(imu)
 }
 
 impl fmt::Debug for Imu {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Imu").finish_non_exhaustive()
+        f.debug_struct("Imu")
+            .field("gyroscope_offset", &self.gyroscope_offset)
+            .finish_non_exhaustive()
     }
 }

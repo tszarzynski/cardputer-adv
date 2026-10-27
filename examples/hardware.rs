@@ -1,7 +1,17 @@
-//! Tries the parts on a Cardputer ADV, logging what each does: the RGB LED
-//! cycles through colours, G0 sends an NEC code over IR (a phone camera shows
-//! the IR LED), the motion sensor and the microphone's level are logged, and
-//! the microSD card's size, if there's one.
+//! Tries the parts on a Cardputer ADV. The screen lists what to do, and
+//! each step turns green once it's seen to work:
+//!
+//! 1. Lie it flat and still while it starts: the gyroscope calibrates.
+//! 2. Press G0 three times: each press sends an NEC code over IR (a phone
+//!    camera shows the IR LED).
+//! 3. Clap near it: the microphone.
+//! 4. Tilt it on its side: the motion sensor. The gyroscope's line shows
+//!    how fast it's turning, so it reads about 0 whenever it's still.
+//! 5. Watch the RGB LED cycle red, green, blue and off. Nothing can see it,
+//!    so this line stays white.
+//!
+//! The microSD card's size shows too, if there's one, and everything is
+//! logged over USB as well.
 //!
 //! `just hardware`, or `cargo run --release --example hardware --features sd-card`
 
@@ -12,11 +22,24 @@
     reason = "esp-hal's async drivers aren't Send; each task runs on the executor that made it"
 )]
 
-use cardputer_adv::{AudioPins, Button, Imu, IrTransmitter, RgbLed, embedded_sdmmc::BlockDevice};
+use core::{
+    fmt::{self, Write as _},
+    str,
+    sync::atomic::{AtomicU32, Ordering},
+};
+
+use cardputer_adv::{
+    AudioPins, Button, Display, Imu, IrTransmitter, RgbLed, embedded_sdmmc::BlockDevice,
+};
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Ticker, Timer};
-use embedded_graphics::{pixelcolor::Rgb888, prelude::*};
+use embedded_graphics::{
+    mono_font::{MonoTextStyle, MonoTextStyleBuilder, ascii::FONT_6X10},
+    pixelcolor::{Rgb565, Rgb888},
+    prelude::*,
+    text::{Baseline, Text},
+};
 use esp_backtrace as _;
 use esp_hal::{clock::CpuClock, interrupt::Priority, timer::timg::TimerGroup};
 use esp_rtos::embassy::InterruptExecutor;
@@ -29,9 +52,12 @@ esp_bootloader_esp_idf::esp_app_desc!();
 /// their logging) never starve the streams.
 static AUDIO_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
 
-/// What the microphone heard over the last half second, for the main task to
-/// log: logging in the audio task would hold the streams up.
+/// What the microphone heard over the last half second, for the main task
+/// to show: drawing or logging in the audio task would hold the streams up.
 static HEARD: Signal<CriticalSectionRawMutex, Heard> = Signal::new();
+
+/// G0 presses so far.
+static PRESSES: AtomicU32 = AtomicU32::new(0);
 
 /// Half a second of the microphone.
 struct Heard {
@@ -42,6 +68,11 @@ struct Heard {
     peak: u16,
 }
 
+/// A clap's peak is in the tens of thousands; a quiet room's, a few dozen.
+const CLAP_PEAK: u16 = 8000;
+/// On its side, gravity is mostly along x or y (milli-g).
+const TILTED_MG: i32 = 700;
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
@@ -50,23 +81,33 @@ async fn main(spawner: Spawner) -> ! {
     info!("hardware test");
 
     // The backlight's switch also powers the RGB LED.
-    let (_display, _backlight) =
+    let (display, _backlight) =
         cardputer_adv::display(cardputer_adv::display_pins!(p)).expect("display");
+    let mut screen = Screen::new(display);
+    screen.show(0, false, format_args!("HARDWARE TEST - keep it still..."));
     let bus = cardputer_adv::i2c(cardputer_adv::i2c_pins!(p)).expect("I2C bus");
+
+    let mut imu = cardputer_adv::imu(bus).expect("motion sensor");
+    imu.calibrate_gyroscope().await.expect("gyroscope");
+    info!("{imu:?}");
 
     let card = cardputer_adv::sd_card(cardputer_adv::sd_card_pins!(p)).expect("microSD bus");
     match card.num_blocks() {
-        Ok(blocks) => info!("microSD: {} MB", u64::from(blocks.0) * 512 / 1_000_000),
-        Err(error) => warn!("microSD: {error:?}"),
+        Ok(blocks) => {
+            let megabytes = u64::from(blocks.0) * 512 / 1_000_000;
+            info!("microSD: {megabytes} MB");
+            screen.show(9, true, format_args!("microSD: {megabytes} MB"));
+        }
+        Err(error) => {
+            warn!("microSD: {error:?}");
+            screen.show(9, false, format_args!("microSD: none ({error:?})"));
+        }
     }
 
     let rmt = cardputer_adv::rmt(p.RMT).expect("RMT");
     let led = cardputer_adv::rgb_led(rmt.channel0, p.GPIO21).expect("RGB LED");
     let ir = cardputer_adv::ir_transmitter(rmt.channel1, p.GPIO44).expect("IR");
     let button = cardputer_adv::button(p.GPIO0);
-
-    let mut imu = cardputer_adv::imu(bus).expect("motion sensor");
-    imu.set_gyroscope(true).expect("gyroscope");
 
     // The streams are made in their task (they aren't Send); the codec
     // clocks itself from them, so it's set up once they run.
@@ -81,7 +122,7 @@ async fn main(spawner: Spawner) -> ! {
     info!("{codec:?}");
     spawner.spawn(colours(led).expect("colours task"));
     spawner.spawn(remote(button, ir).expect("remote task"));
-    report(imu).await
+    report(screen, imu).await
 }
 
 #[embassy_executor::task]
@@ -98,8 +139,9 @@ async fn colours(mut led: RgbLed) {
 
 #[embassy_executor::task]
 async fn remote(mut button: Button, mut ir: IrTransmitter) {
-    for press in 1.. {
+    loop {
         button.wait_for_press().await;
+        let press = PRESSES.fetch_add(1, Ordering::Relaxed) + 1;
         info!("G0: press {press}, sending NEC 0x00/0x45");
         if let Err(error) = ir.send_nec(0x00, 0x45).await {
             warn!("IR: {error}");
@@ -133,18 +175,119 @@ async fn listen(pins: AudioPins) {
     warn!("audio stopped: {error}");
 }
 
-/// Logs the motion sensor and the microphone, each second.
-async fn report(mut imu: Imu) -> ! {
-    let mut ticker = Ticker::every(Duration::from_secs(1));
+/// Shows the steps and what each part reads, and logs it, twice a second.
+async fn report(mut screen: Screen, mut imu: Imu) -> ! {
+    screen.show(0, false, format_args!("HARDWARE TEST - do each step:"));
+    screen.show(1, true, format_args!("1. Lie still: gyro calibrated"));
+    screen.show(
+        8,
+        false,
+        format_args!("5. By eye: LED red, green, blue, off"),
+    );
+    let (mut loudest, mut tilted) = (0, false);
+    let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
+        let presses = PRESSES.load(Ordering::Relaxed);
+        screen.show(
+            2,
+            presses >= 3,
+            format_args!("2. Press G0 3 times: {presses}"),
+        );
+
+        if let Some(Heard { mean, level, peak }) = HEARD.try_take() {
+            info!("microphone: level {level}, peak {peak}, mean {mean}");
+            loudest = loudest.max(peak);
+        }
+        screen.show(
+            3,
+            loudest >= CLAP_PEAK,
+            format_args!("3. Clap near it: loudest {loudest}"),
+        );
+
         match (imu.acceleration(), imu.rotation()) {
-            (Ok(mg), Ok(mdps)) => info!("motion: {mg:?} mg, {mdps:?} m°/s"),
+            (Ok(mg @ [x, y, z]), Ok(mdps)) => {
+                info!("motion: {mg:?} mg, {mdps:?} m°/s");
+                tilted |= x.abs() >= TILTED_MG || y.abs() >= TILTED_MG;
+                screen.show(4, tilted, format_args!("4. Tilt it on its side"));
+                screen.show(5, false, format_args!("   accel {x} {y} {z} mg"));
+                let [rx, ry, rz] = mdps.map(|m| m / 1000);
+                screen.show(6, false, format_args!("   turning {rx} {ry} {rz} deg/s"));
+            }
             (Err(error), _) | (_, Err(error)) => warn!("motion: {error}"),
         }
-        if let Some(heard) = HEARD.try_take() {
-            let Heard { mean, level, peak } = heard;
-            info!("microphone: level {level}, peak {peak}, mean {mean}");
+        if presses >= 3 && loudest >= CLAP_PEAK && tilted {
+            screen.show(11, true, format_args!("All seen. Unplug when done."));
         }
         ticker.next().await;
+    }
+}
+
+/// The LCD as rows of text.
+struct Screen {
+    display: Display,
+}
+
+impl Screen {
+    /// Characters a row: the screen's width in 6-pixel glyphs.
+    const COLUMNS: usize = 40;
+    /// Pixels a row: the 10-pixel font, and a gap.
+    const ROW_HEIGHT: i32 = 11;
+
+    fn new(mut display: Display) -> Self {
+        display.clear(Rgb565::BLACK).expect("LCD");
+        Self { display }
+    }
+
+    /// Writes row `row`, green once its step is `done`. The row is padded
+    /// with spaces, so what was there before is overwritten.
+    fn show(&mut self, row: i32, done: bool, text: fmt::Arguments<'_>) {
+        let mut line = Line::new();
+        // Longer lines are cut at the screen's edge.
+        let _ = line.write_fmt(text);
+        line.pad();
+        let style: MonoTextStyle<'_, Rgb565> = MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(if done { Rgb565::GREEN } else { Rgb565::WHITE })
+            .background_color(Rgb565::BLACK)
+            .build();
+        let top_left = Point::new(0, row * Self::ROW_HEIGHT);
+        Text::with_baseline(line.as_str(), top_left, style, Baseline::Top)
+            .draw(&mut self.display)
+            .expect("LCD");
+    }
+}
+
+/// One row of [`Screen`]'s text, formatted without an allocator. ASCII
+/// only, so cutting it at any byte leaves it valid.
+struct Line {
+    bytes: [u8; Screen::COLUMNS],
+    len: usize,
+}
+
+impl Line {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; Screen::COLUMNS],
+            len: 0,
+        }
+    }
+
+    fn pad(&mut self) {
+        self.bytes[self.len..].fill(b' ');
+        self.len = self.bytes.len();
+    }
+
+    fn as_str(&self) -> &str {
+        str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+}
+
+impl fmt::Write for Line {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let room = self.bytes.len() - self.len;
+        let taken = text.len().min(room);
+        self.bytes[self.len..self.len + taken].copy_from_slice(&text.as_bytes()[..taken]);
+        self.len += taken;
+        Ok(())
     }
 }
