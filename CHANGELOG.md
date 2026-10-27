@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-27
+
 - `IrTransmitter::send_raw` sends any remote's code as `(mark, space)` pulses in µs, up to `IrTransmitter::MAX_PULSES` (128); `MAX_DURATION` is the longest mark or space.
 - Host tests: the pure logic (the unit conversions, the LED's and IR codes' pulses, the framebuffer's change tracking) is in modules without esp-hal, which `host-tests/` builds and tests on the host (`just test`, and in CI).
 - CI: `actions/checkout@v5`, `just` from `taiki-e/install-action`, and the runner pinned to Ubuntu 24.04.
