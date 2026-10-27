@@ -84,36 +84,42 @@ mod audio;
 mod battery;
 mod button;
 mod codec;
+mod convert;
 mod display;
 mod error;
 mod frame;
+mod frame_display;
 mod i2c;
 mod imu;
 mod ir;
 mod keyboard;
 mod led;
 mod microphone;
+mod panel;
 mod pins;
+mod pulses;
 mod remote;
 #[cfg(feature = "sd-card")]
 mod sd_card;
 mod speaker;
 
 pub use audio::{Audio, AudioPins, audio};
-pub use battery::{Battery, BatteryPins, battery, battery_percent};
+pub use battery::{Battery, BatteryPins, battery};
 pub use button::{Button, button};
 /// The keyboard driver and its key types ([cardputer-adv-keyboard]).
 ///
 /// [cardputer-adv-keyboard]: https://crates.io/crates/cardputer-adv-keyboard
 pub use cardputer_adv_keyboard as keys;
 pub use codec::{Codec, codec};
-pub use display::{Backlight, Display, DisplayPins, HEIGHT, WIDTH, display};
+pub use convert::battery_percent;
+pub use display::{Backlight, Display, DisplayPins, display};
 /// The microSD card's FAT file system and driver, at the version
 /// [`SdCard`] uses.
 #[cfg(feature = "sd-card")]
 pub use embedded_sdmmc;
 pub use error::Error;
-pub use frame::{Frame, FrameDisplay, frame_display};
+pub use frame::Frame;
+pub use frame_display::{FrameDisplay, frame_display};
 pub use i2c::{I2cBus, I2cDevice, I2cPins, i2c};
 pub use imu::{Imu, imu};
 pub use ir::{IrTransmitter, ir_transmitter};
@@ -122,6 +128,7 @@ pub use led::{RgbLed, rgb_led};
 /// The display driver [`Display`] comes from, so its types can be named
 /// without matching its version.
 pub use mipidsi;
+pub use panel::{HEIGHT, WIDTH};
 pub use remote::{RMT_FREQUENCY, rmt};
 #[cfg(feature = "sd-card")]
 pub use sd_card::{SdCard, SdCardPins, sd_card};

@@ -146,6 +146,13 @@ async fn remote(mut button: Button, mut ir: IrTransmitter) {
         if let Err(error) = ir.send_nec(0x00, 0x45).await {
             warn!("IR: {error}");
         }
+        // The same code's repeat, as raw pulses: what send_raw sends for
+        // other protocols.
+        Timer::after(Duration::from_millis(40)).await;
+        match ir.send_raw(&[(9000, 2250), (562, 0)]).await {
+            Ok(()) => info!("IR: sent a raw code"),
+            Err(error) => warn!("IR raw: {error}"),
+        }
     }
 }
 

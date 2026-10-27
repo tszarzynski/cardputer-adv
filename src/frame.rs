@@ -1,8 +1,12 @@
-//! The LCD fed from a framebuffer by DMA.
+//! The whole screen in memory, and which parts of it have changed since
+//! they were sent.
 
-use core::{convert::Infallible, fmt};
+use core::{
+    convert::Infallible,
+    fmt,
+    ops::{Range, RangeInclusive},
+};
 
-use embassy_time::{Duration, Timer};
 use embedded_graphics_core::{
     Pixel,
     draw_target::DrawTarget,
@@ -10,26 +14,16 @@ use embedded_graphics_core::{
     pixelcolor::{IntoStorage, Rgb565},
     primitives::Rectangle,
 };
-use embedded_hal_bus::spi::ExclusiveDevice;
-use esp_hal::{
-    Async,
-    gpio::{Level, Output, OutputConfig},
-    spi::master::{AnySpi, Spi, SpiDma, SpiMasterDmaChannel},
-};
-use mipidsi::interface::SpiInterface;
 
-use crate::{
-    Backlight, DisplayPins, Error, HEIGHT, WIDTH,
-    display::{PANEL_OFFSET, backlight, init_panel, spi_config},
-};
+use crate::{HEIGHT, WIDTH};
 
 const W: usize = WIDTH as usize;
 const H: usize = HEIGHT as usize;
 
 /// The columns of a row written since the last flush, `first..=last`.
 /// Clean when `first > last`.
-#[derive(Clone, Copy)]
-struct Span {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
     first: u8,
     last: u8,
 }
@@ -80,6 +74,22 @@ fn row_hash(row: &[u16]) -> u32 {
     })
 }
 
+/// A rectangle of changed rows to send: `rows`, each `columns` wide.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Run {
+    /// The rows, top to bottom.
+    pub rows: Range<usize>,
+    /// The columns, as wide as what was drawn on any of the rows.
+    pub columns: RangeInclusive<usize>,
+}
+
+impl Run {
+    /// Whether the run is whole rows, so its pixels are one slice.
+    pub const fn is_full_width(&self) -> bool {
+        *self.columns.start() == 0 && *self.columns.end() == W - 1
+    }
+}
+
 /// The whole screen in memory (64.8 kB of RGB565), for [`FrameDisplay`].
 ///
 /// Draw into it with embedded-graphics, overlapping shapes freely; then
@@ -92,6 +102,9 @@ fn row_hash(row: &[u16]) -> u32 {
 /// ```ignore
 /// static FRAME: ConstStaticCell<Frame> = ConstStaticCell::new(Frame::new());
 /// ```
+///
+/// [`FrameDisplay`]: crate::FrameDisplay
+/// [`FrameDisplay::flush`]: crate::FrameDisplay::flush
 pub struct Frame {
     /// RGB565, row by row, each stored so that its bytes in memory are
     /// big-endian: the bytes the panel takes. Whole `u16`s, so filling
@@ -101,6 +114,9 @@ pub struct Frame {
     written: [Span; H],
     /// Each row's [`row_hash`] when it was last sent.
     sent: [u32; H],
+    /// Each row's hash as [`next_run`](Self::next_run) found it, to become
+    /// [`sent`](Self::sent) once the row is.
+    pending: [u32; H],
     /// Send every written row, whatever its hash: the panel's contents
     /// aren't known.
     stale: bool,
@@ -119,6 +135,7 @@ impl Frame {
             pixels: [0; W * H],
             written: [Span::FULL; H],
             sent: [0; H],
+            pending: [0; H],
             stale: true,
         }
     }
@@ -128,6 +145,57 @@ impl Frame {
     pub const fn invalidate(&mut self) {
         self.written = [Span::FULL; H];
         self.stale = true;
+    }
+
+    /// The next run of rows to send, from row `from` on: rows that were
+    /// written and differ from what was sent, as one rectangle as wide as
+    /// what was drawn on them. Rows found unchanged on the way are marked
+    /// clean.
+    pub(crate) fn next_run(&mut self, from: usize) -> Option<Run> {
+        let mut y = from;
+        while y < H {
+            let top = y;
+            let mut span = Span::CLEAN;
+            while y < H
+                && let Some(hash) = self.changed(y)
+            {
+                self.pending[y] = hash;
+                span = span.union(self.written[y]);
+                y += 1;
+            }
+            if !span.is_clean() {
+                return Some(Run {
+                    rows: top..y,
+                    columns: usize::from(span.first)..=usize::from(span.last),
+                });
+            }
+            y += 1;
+        }
+        None
+    }
+
+    /// Marks `run` as sent: its rows are clean until drawn on again.
+    pub(crate) fn mark_sent(&mut self, run: &Run) {
+        let rows = run.rows.clone();
+        self.sent[rows.clone()].copy_from_slice(&self.pending[rows.clone()]);
+        self.written[rows].fill(Span::CLEAN);
+    }
+
+    /// Marks the panel as showing the frame: from now on, rows written
+    /// back the way they were aren't sent.
+    pub(crate) const fn mark_shown(&mut self) {
+        self.stale = false;
+    }
+
+    /// Row `row`'s pixels in `columns`, as the bytes the panel takes.
+    pub(crate) fn row_bytes(&self, row: usize, columns: RangeInclusive<usize>) -> &[u8] {
+        let (first, last) = columns.into_inner();
+        bytemuck::cast_slice(&self.pixels[row * W + first..=row * W + last])
+    }
+
+    /// Whole `rows`' pixels, as the bytes the panel takes.
+    pub(crate) fn rows_bytes(&self, rows: Range<usize>) -> &[u8] {
+        bytemuck::cast_slice(&self.pixels[rows.start * W..rows.end * W])
     }
 
     /// Row `y`'s hash, if it has to be sent: it was written, and it differs
@@ -215,177 +283,6 @@ impl DrawTarget for Frame {
     }
 }
 
-/// The LCD, fed from a [`Frame`] by DMA: sending a whole frame takes about
-/// 13 ms (64.8 kB at 40 MHz), during which other tasks run.
-#[derive(Debug)]
-pub struct FrameDisplay {
-    spi: SpiDma<'static, Async>,
-    cs: Output<'static>,
-    dc: Output<'static>,
-    /// Held high: the panel resets while it's low.
-    _reset: Output<'static>,
-}
-
-/// Transfers shorter than this go by the CPU, not DMA. Commands are a few
-/// bytes, and may be in flash, where DMA can't read.
-const MIN_DMA_TRANSFER: usize = 64;
-
-/// The ST7789 commands [`FrameDisplay`] sends.
-const SLPIN: u8 = 0x10;
-const SLPOUT: u8 = 0x11;
-const CASET: u8 = 0x2A;
-const RASET: u8 = 0x2B;
-const RAMWR: u8 = 0x2C;
-
-/// The landscape frame's origin in the ST7789's memory, as mipidsi works it
-/// out for a 90° rotation: columns mirrored, then swapped with rows.
-const COLUMN_OFFSET: u16 = PANEL_OFFSET.1;
-const ROW_OFFSET: u16 = 240 - (HEIGHT + PANEL_OFFSET.0);
-
-impl FrameDisplay {
-    /// Sends the rows of `frame` that changed since the last flush, each run
-    /// of changed rows as one rectangle, as wide as what was drawn on them.
-    ///
-    /// If this is cancelled, the rows not yet sent are sent next time.
-    ///
-    /// # Errors
-    ///
-    /// If the SPI transfer fails; the rows not sent stay changed.
-    pub async fn flush(&mut self, frame: &mut Frame) -> Result<(), Error> {
-        self.cs.set_low();
-        let sent = self.send(frame).await;
-        self.cs.set_high();
-        sent
-    }
-
-    async fn send(&mut self, frame: &mut Frame) -> Result<(), Error> {
-        let mut hashes = [0; H];
-        let mut y = 0;
-        while y < H {
-            let top = y;
-            let mut span = Span::CLEAN;
-            while y < H
-                && let Some(hash) = frame.changed(y)
-            {
-                hashes[y] = hash;
-                span = span.union(frame.written[y]);
-                y += 1;
-            }
-            if span.is_clean() {
-                y += 1;
-                continue;
-            }
-            let (first, last) = (usize::from(span.first), usize::from(span.last));
-            self.window(first, top, last, y - 1).await?;
-            if first == 0 && last == W - 1 {
-                // Whole rows: one transfer.
-                self.write(bytemuck::cast_slice(&frame.pixels[top * W..y * W]))
-                    .await?;
-            } else {
-                for row in top..y {
-                    let pixels = &frame.pixels[row * W + first..=row * W + last];
-                    self.write(bytemuck::cast_slice(pixels)).await?;
-                }
-            }
-            frame.sent[top..y].copy_from_slice(&hashes[top..y]);
-            frame.written[top..y].fill(Span::CLEAN);
-        }
-        frame.stale = false;
-        Ok(())
-    }
-
-    /// Puts the panel's controller to sleep (`asleep`), keeping the picture
-    /// in its memory, or wakes it. Asleep it draws a few microamps instead
-    /// of a few milliamps; turn the [`Backlight`] off first, as the panel
-    /// shows nothing meanwhile.
-    ///
-    /// Returns once the controller can take the next command (5 ms). It
-    /// shouldn't be put back to sleep within 120 ms of waking.
-    ///
-    /// # Errors
-    ///
-    /// If the SPI transfer fails.
-    pub async fn set_asleep(&mut self, asleep: bool) -> Result<(), Error> {
-        self.cs.set_low();
-        let sent = self.command(if asleep { SLPIN } else { SLPOUT }, &[]).await;
-        self.cs.set_high();
-        Timer::after(Duration::from_millis(5)).await;
-        sent
-    }
-
-    /// Selects the rectangle the next pixels fill, row by row.
-    #[expect(clippy::cast_possible_truncation, reason = "inside the 240×135 frame")]
-    async fn window(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) -> Result<(), Error> {
-        let range = |from: usize, to: usize, offset: u16| {
-            let [a, b] = (from as u16 + offset).to_be_bytes();
-            let [c, d] = (to as u16 + offset).to_be_bytes();
-            [a, b, c, d]
-        };
-        self.command(CASET, &range(x0, x1, COLUMN_OFFSET)).await?;
-        self.command(RASET, &range(y0, y1, ROW_OFFSET)).await?;
-        self.command(RAMWR, &[]).await
-    }
-
-    async fn command(&mut self, command: u8, args: &[u8]) -> Result<(), Error> {
-        self.dc.set_low();
-        self.write(&[command]).await?;
-        self.dc.set_high();
-        self.write(args).await
-    }
-
-    async fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        // Returns once the bytes are out, so DC can change after it.
-        self.spi
-            .write_async(bytes)
-            .await
-            .map_err(|_| Error::DisplayWrite)
-    }
-}
-
-/// Initialises the LCD to be fed from a [`Frame`] by DMA, on the DMA channel
-/// given, and turns the backlight on at full brightness.
-///
-/// # Errors
-///
-/// If the SPI bus or the panel can't be set up.
-///
-/// # Panics
-///
-/// If called twice, or with [`display`] (the PWM timer is a `static`).
-///
-/// [`display`]: crate::display
-pub fn frame_display(
-    pins: DisplayPins,
-    dma: impl SpiMasterDmaChannel<'static, AnySpi<'static>>,
-) -> Result<(FrameDisplay, Backlight), Error> {
-    let backlight = backlight(pins.ledc, pins.backlight)?;
-    let mut dc = Output::new(pins.dc, Level::Low, OutputConfig::default());
-    let mut reset = Output::new(pins.reset, Level::High, OutputConfig::default());
-    let mut cs = Output::new(pins.cs, Level::High, OutputConfig::default());
-    let mut spi = Spi::new(
-        pins.spi,
-        spi_config().with_min_async_transfer_size(MIN_DMA_TRANSFER),
-    )
-    .map_err(|_| Error::DisplaySpi)?
-    .with_sck(pins.sck)
-    .with_mosi(pins.mosi)
-    .with_dma(dma);
-    // mipidsi sets the panel up through borrows, which then end: the
-    // flushes drive it directly.
-    let mut buffer = [0; 64];
-    let device = ExclusiveDevice::new_no_delay(&mut spi, &mut cs).map_err(|_| Error::DisplaySpi)?;
-    init_panel(SpiInterface::new(device, &mut dc, &mut buffer), &mut reset)?;
-    Ok((
-        FrameDisplay {
-            spi: spi.into_async(),
-            cs,
-            dc,
-            _reset: reset,
-        },
-        backlight,
-    ))
-}
-
 impl fmt::Debug for Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let written = self.written.iter().filter(|span| !span.is_clean()).count();
@@ -393,5 +290,112 @@ impl fmt::Debug for Frame {
             .field("rows_written", &written)
             .field("stale", &self.stale)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use embedded_graphics_core::{geometry::Point, pixelcolor::RgbColor};
+
+    use super::*;
+
+    /// Every run a flush would send now, marking each sent.
+    fn flush(frame: &mut Frame) -> Vec<Run> {
+        let mut runs = Vec::new();
+        let mut from = 0;
+        while let Some(run) = frame.next_run(from) {
+            from = run.rows.end;
+            frame.mark_sent(&run);
+            runs.push(run);
+        }
+        frame.mark_shown();
+        runs
+    }
+
+    /// A frame the panel already shows.
+    fn shown() -> Box<Frame> {
+        let mut frame = Box::new(Frame::new());
+        flush(&mut frame);
+        frame
+    }
+
+    fn dot(frame: &mut Frame, x: i32, y: i32, color: Rgb565) {
+        let Ok(()) = frame.draw_iter([Pixel(Point::new(x, y), color)]);
+    }
+
+    fn fill(frame: &mut Frame, x: i32, y: i32, size: u32, color: Rgb565) {
+        let area = Rectangle::new(Point::new(x, y), Size::new(size, size));
+        let Ok(()) = frame.fill_solid(&area, color);
+    }
+
+    const fn run(rows: Range<usize>, columns: RangeInclusive<usize>) -> Run {
+        Run { rows, columns }
+    }
+
+    #[test]
+    fn a_new_frame_is_sent_whole_then_nothing() {
+        let mut frame = Box::new(Frame::new());
+        let runs = flush(&mut frame);
+        assert_eq!(runs, [run(0..H, 0..=W - 1)]);
+        assert!(runs[0].is_full_width());
+        assert_eq!(flush(&mut frame), []);
+    }
+
+    #[test]
+    fn only_what_changed_is_sent() {
+        let mut frame = shown();
+        dot(&mut frame, 10, 5, Rgb565::RED);
+        dot(&mut frame, 30, 6, Rgb565::RED);
+        dot(&mut frame, 7, 9, Rgb565::RED);
+        assert_eq!(flush(&mut frame), [run(5..7, 10..=30), run(9..10, 7..=7)]);
+        assert_eq!(
+            frame.row_bytes(5, 10..=10),
+            Rgb565::RED.into_storage().to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn a_row_drawn_back_the_way_it_was_isnt_sent() {
+        let mut frame = shown();
+        dot(&mut frame, 10, 5, Rgb565::BLACK);
+        assert_eq!(flush(&mut frame), []);
+        // Unless the panel's contents are unknown again.
+        frame.invalidate();
+        dot(&mut frame, 10, 5, Rgb565::BLACK);
+        assert_eq!(flush(&mut frame), [run(0..H, 0..=W - 1)]);
+    }
+
+    #[test]
+    fn a_run_not_sent_is_found_again() {
+        let mut frame = shown();
+        dot(&mut frame, 3, 3, Rgb565::GREEN);
+        // A cancelled flush: found, but never marked sent.
+        assert_eq!(frame.next_run(0), Some(run(3..4, 3..=3)));
+        assert_eq!(flush(&mut frame), [run(3..4, 3..=3)]);
+    }
+
+    #[test]
+    fn drawing_is_clipped_to_the_screen() {
+        let mut frame = shown();
+        fill(&mut frame, -5, -5, 10, Rgb565::BLUE);
+        assert_eq!(flush(&mut frame), [run(0..5, 0..=4)]);
+        fill(&mut frame, 300, 10, 10, Rgb565::BLUE);
+        dot(&mut frame, -1, 200, Rgb565::BLUE);
+        assert_eq!(flush(&mut frame), []);
+    }
+
+    #[test]
+    fn whole_rows_are_one_slice() {
+        let frame = Box::new(Frame::new());
+        assert_eq!(frame.rows_bytes(2..4).len(), 2 * W * 2);
+        assert_eq!(frame.row_bytes(2, 0..=9).len(), 20);
+    }
+
+    #[test]
+    fn one_changed_pixel_changes_the_hash() {
+        let mut row = [0u16; W];
+        let before = row_hash(&row);
+        row[W - 1] = 1;
+        assert_ne!(row_hash(&row), before);
     }
 }

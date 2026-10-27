@@ -1,5 +1,5 @@
-# lints and a build for the ESP32-S3 (needs the esp toolchain: `espup install`)
-default: check
+# lints for the ESP32-S3 (needs the esp toolchain: `espup install`), and the host tests
+default: check test
 
 # The esp toolchain's environment, from espup's export file where there is one
 # (CI's toolchain action sets it up itself).
@@ -8,6 +8,10 @@ esp := "if [ -f ~/export-esp.sh ]; then . ~/export-esp.sh; fi"
 # formatting, and clippy (pedantic and nursery; warnings are errors), with no features and with all of them, and the example
 check:
     {{esp}} && cargo fmt -- --check && cargo clippy --release -- -D warnings && cargo clippy --release --all-features --example hardware -- -D warnings
+
+# the pure logic's tests, on the host with stable Rust (host-tests/ builds those modules from src/), with fmt and clippy on them
+test:
+    cd host-tests && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 
 # format the code
 fix:

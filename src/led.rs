@@ -9,7 +9,7 @@ use esp_hal::{
     rmt::{PulseCode, TxChannelConfig, TxChannelCreator},
 };
 
-use crate::{Error, remote::RmtTx};
+use crate::{Error, pulses::ws2812_bits, remote::RmtTx};
 
 /// A WS2812 bit in RMT ticks: a 0 is high for 0.4 µs then low for 0.8 µs,
 /// a 1 high for 0.8 µs then low for 0.4 µs (each within its 0.15 µs
@@ -40,16 +40,13 @@ impl RgbLed {
     ///
     /// If the RMT fails to send it.
     pub async fn set_color(&mut self, color: Rgb888) -> Result<(), Error> {
-        // Green, red, blue, each most significant bit first; then the end
-        // marker.
-        let grb = (u32::from(color.g()) << 16) | (u32::from(color.r()) << 8) | u32::from(color.b());
+        // The 24 bits, then the end marker.
         let mut codes = [PulseCode::end_marker(); 25];
-        for (bit, code) in (0..24).rev().zip(&mut codes) {
-            *code = if (grb >> bit) & 1 == 1 {
-                LED_ONE
-            } else {
-                LED_ZERO
-            };
+        for (code, one) in codes
+            .iter_mut()
+            .zip(ws2812_bits(color.r(), color.g(), color.b()))
+        {
+            *code = if one { LED_ONE } else { LED_ZERO };
         }
         self.channel
             .transmit(&codes)

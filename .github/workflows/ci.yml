@@ -1,4 +1,5 @@
-# Lints, builds and packages the crate for the ESP32-S3, and publishes its API
+# Tests the crate's pure logic on the host; lints, builds and packages the
+# crate for the ESP32-S3; and publishes its API
 # docs to GitHub Pages from main (docs.rs can't build for Xtensa).
 name: CI
 
@@ -17,17 +18,30 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install the Xtensa toolchain
         uses: esp-rs/xtensa-toolchain@v1.5
         with:
           default: true
           buildtargets: esp32s3
           ldproxy: false
-      - uses: extractions/setup-just@v3
+          # rust-toolchain.toml picks it: esp for the crate, stable for
+          # host-tests/.
+          override: false
+      - name: Install stable Rust, for the host tests
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            host-tests -> target
+      - name: Host tests
+        run: just test
       - name: Formatting and clippy
         run: just check
       - name: Build
@@ -49,7 +63,7 @@ jobs:
   pages:
     needs: check
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write

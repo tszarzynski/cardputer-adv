@@ -29,12 +29,10 @@ use mipidsi::{
 };
 use static_cell::StaticCell;
 
-use crate::Error;
-
-/// Display width in landscape.
-pub const WIDTH: u16 = 240;
-/// Display height in landscape.
-pub const HEIGHT: u16 = 135;
+use crate::{
+    Error,
+    panel::{HEIGHT, PANEL_OFFSET, WIDTH},
+};
 
 type DisplaySpi = ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, NoDelay>;
 
@@ -143,9 +141,6 @@ pub fn spi_config() -> SpiConfig {
         .with_frequency(Rate::from_mhz(40))
         .with_mode(Mode::_0)
 }
-
-/// Where the panel's 135×240 pixels sit in the ST7789's 240×320 memory.
-pub const PANEL_OFFSET: (u16, u16) = (52, 40);
 
 /// Initialises the panel in landscape (keyboard below), colours inverted.
 pub fn init_panel<DI, RST>(

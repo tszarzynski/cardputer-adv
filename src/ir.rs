@@ -1,5 +1,5 @@
 //! The IR transmitter: an IR LED driven by an RMT channel, sending NEC
-//! codes.
+//! codes, or any remote's as raw pulses.
 
 use esp_hal::{
     Async,
@@ -8,7 +8,11 @@ use esp_hal::{
     rmt::{PulseCode, TxChannelConfig, TxChannelCreator},
 };
 
-use crate::{Error, remote::RmtTx};
+use crate::{
+    Error,
+    pulses::{self, MAX_RAW_PULSES, NEC_REPEAT, NEC_STOP},
+    remote::RmtTx,
+};
 
 /// The IR channel's tick, 1 µs: the RMT's clock divided by this.
 const IR_DIVIDER: u8 = 10;
@@ -18,24 +22,29 @@ const IR_DIVIDER: u8 = 10;
 const IR_CARRIER_HIGH: u16 = 88;
 const IR_CARRIER_LOW: u16 = 175;
 
-/// NEC's pulses, in 1 µs ticks: a burst of the carrier, then a space.
-const NEC_START: PulseCode = PulseCode::new(Level::High, 9000, Level::Low, 4500);
-const NEC_REPEAT: PulseCode = PulseCode::new(Level::High, 9000, Level::Low, 2250);
-const NEC_ZERO: PulseCode = PulseCode::new(Level::High, 562, Level::Low, 563);
-const NEC_ONE: PulseCode = PulseCode::new(Level::High, 562, Level::Low, 1688);
-/// The burst that closes the last space; its zero-length space is the end
-/// marker.
-const NEC_STOP: PulseCode = PulseCode::new(Level::High, 562, Level::Low, 0);
+/// The RMT code for a `(mark, space)` pair: the carrier on for `mark` µs,
+/// then off for `space`. A zero space ends the code.
+const fn burst((mark, space): (u16, u16)) -> PulseCode {
+    PulseCode::new(Level::High, mark, Level::Low, space)
+}
 
 /// The IR transmitter: an IR LED on GPIO44, driven by an RMT channel with a
-/// 38 kHz carrier. It sends NEC remote-control codes, the protocol most
-/// remotes use.
+/// 38 kHz carrier.
+///
+/// It sends NEC remote-control codes, the protocol most remotes use, and
+/// any other protocol's as raw pulses ([`send_raw`](Self::send_raw)).
 #[derive(Debug)]
 pub struct IrTransmitter {
     channel: RmtTx,
 }
 
 impl IrTransmitter {
+    /// The most `(mark, space)` pairs [`send_raw`](Self::send_raw) takes.
+    pub const MAX_PULSES: usize = MAX_RAW_PULSES;
+
+    /// The longest mark or space [`send_raw`](Self::send_raw) takes, in µs.
+    pub const MAX_DURATION: u16 = pulses::MAX_DURATION;
+
     /// Sends an NEC code: `address` and `command`, each followed by its
     /// inverse. Returns once it's sent (68 ms).
     ///
@@ -54,17 +63,9 @@ impl IrTransmitter {
     ///
     /// If the RMT fails to send it.
     pub async fn send_nec_extended(&mut self, address: u16, command: u8) -> Result<(), Error> {
-        let [low, high] = address.to_le_bytes();
-        let data = u32::from_le_bytes([low, high, command, !command]);
-        let mut codes = [NEC_STOP; 34];
-        codes[0] = NEC_START;
-        // Least significant bit first.
-        for (bit, code) in (0..32).zip(&mut codes[1..]) {
-            *code = if (data >> bit) & 1 == 1 {
-                NEC_ONE
-            } else {
-                NEC_ZERO
-            };
+        let mut codes = [PulseCode::end_marker(); 34];
+        for (code, pulse) in codes.iter_mut().zip(pulses::nec(address, command)) {
+            *code = burst(pulse);
         }
         self.transmit(&codes).await
     }
@@ -76,7 +77,33 @@ impl IrTransmitter {
     ///
     /// If the RMT fails to send it.
     pub async fn send_nec_repeat(&mut self) -> Result<(), Error> {
-        self.transmit(&[NEC_REPEAT, NEC_STOP]).await
+        self.transmit(&[burst(NEC_REPEAT), burst(NEC_STOP)]).await
+    }
+
+    /// Sends a code given as its pulses, for protocols other than NEC (Sony,
+    /// RC5, Samsung, an air conditioner's) or timings recorded from a
+    /// remote: each `(mark, space)` is the carrier on for `mark` µs, then
+    /// off for `space` µs. Returns once it's sent.
+    ///
+    /// Codes longer than the RMT channel's memory (48 pulses) are fed to it
+    /// from its interrupt as they go out.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Ir`] if there are no pulses or more than
+    /// [`MAX_PULSES`](Self::MAX_PULSES), a mark or space is zero (only the
+    /// last space may be) or longer than [`MAX_DURATION`](Self::MAX_DURATION),
+    /// or the RMT fails to send it.
+    pub async fn send_raw(&mut self, pulses: &[(u16, u16)]) -> Result<(), Error> {
+        if !pulses::is_sendable(pulses) {
+            return Err(Error::Ir);
+        }
+        // The pulses, then the end marker.
+        let mut codes = [PulseCode::end_marker(); MAX_RAW_PULSES + 1];
+        for (code, &pulse) in codes.iter_mut().zip(pulses) {
+            *code = burst(pulse);
+        }
+        self.transmit(&codes[..=pulses.len()]).await
     }
 
     async fn transmit(&mut self, codes: &[PulseCode]) -> Result<(), Error> {

@@ -8,6 +8,8 @@ use esp_hal::{
     peripherals::{ADC1, GPIO10},
 };
 
+use crate::convert::battery_percent;
+
 /// The peripherals the battery measurement uses.
 #[derive(Debug)]
 pub struct BatteryPins {
@@ -42,18 +44,11 @@ impl Battery {
     /// The charge left, in percent, estimated from [`millivolts`](Self::millivolts)
     /// ([`battery_percent`]). Reads high on USB, where it can't be told from
     /// charging.
+    ///
+    /// [`battery_percent`]: crate::battery_percent
     pub fn percent(&mut self) -> u8 {
         battery_percent(self.millivolts())
     }
-}
-
-/// The charge left in percent for the battery at `millivolts`: M5Stack's
-/// estimate for the Cardputer (M5Unified's `Power_Class::getBatteryLevel`),
-/// 3.30 V empty, 4.10 V full, linear in between.
-#[must_use]
-pub fn battery_percent(millivolts: u16) -> u8 {
-    let level = (i32::from(millivolts) - 3300) * 100 / 800;
-    u8::try_from(level.clamp(0, 100)).unwrap_or(100)
 }
 
 /// Sets up the battery measurement: ADC1 with the chip's calibration curve,

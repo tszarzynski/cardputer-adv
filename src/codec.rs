@@ -6,7 +6,10 @@ use core::fmt;
 use embedded_hal::i2c::I2c as _;
 use embedded_hal_bus::i2c::CriticalSectionDevice;
 
-use crate::{Error, I2cBus, I2cDevice};
+use crate::{
+    Error, I2cBus, I2cDevice,
+    convert::{microphone_gain_step, volume_register},
+};
 
 /// The ES8311's I2C address.
 const ES8311: u8 = 0x18;
@@ -48,9 +51,7 @@ impl Codec {
     ///
     /// If the codec doesn't answer.
     pub fn set_volume(&mut self, percent: u8) -> Result<(), Error> {
-        let step = u16::from(percent.min(100)) * 0xBF / 100;
-        let register = u8::try_from(step).unwrap_or(0xBF);
-        self.write(&[[ES8311_DAC_VOLUME, register]])
+        self.write(&[[ES8311_DAC_VOLUME, volume_register(percent)]])
     }
 
     /// Turns the output to the amplifier off (`on = false`), or back on as
@@ -108,7 +109,7 @@ impl Codec {
     ///
     /// If the codec doesn't answer.
     pub fn set_microphone_gain(&mut self, db: u8) -> Result<(), Error> {
-        self.microphone_gain = db.min(30) / 3;
+        self.microphone_gain = microphone_gain_step(db);
         self.write(&[[ES8311_ADC_PGA, MIC1 | self.microphone_gain]])
     }
 

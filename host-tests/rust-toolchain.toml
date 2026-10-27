@@ -1,0 +1,4 @@
+# Stable Rust for the host, not the crate's Xtensa toolchain.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]

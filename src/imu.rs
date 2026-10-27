@@ -14,7 +14,10 @@ use embassy_time::{Duration, Timer};
 use embedded_hal_bus::i2c::CriticalSectionDevice;
 use esp_hal::delay::Delay;
 
-use crate::{Error, I2cBus, I2cDevice};
+use crate::{
+    Error, I2cBus, I2cDevice,
+    convert::{milli_g, millidegrees_per_second},
+};
 
 /// The largest I2C write while uploading the BMI270's configuration.
 const IMU_BURST: u16 = 128;
@@ -47,9 +50,7 @@ impl Imu {
     /// If the sensor can't be read.
     pub fn acceleration(&mut self) -> Result<[i32; 3], Error> {
         let data = self.bmi.get_acc_data().map_err(|_| Error::Imu)?;
-        // ±8 g over the i16 range: 4096 counts per g.
-        let mg = |raw: i16| i32::from(raw) * 1000 / 4096;
-        Ok([mg(data.x), mg(data.y), mg(data.z)])
+        Ok([data.x, data.y, data.z].map(|raw| milli_g(i32::from(raw))))
     }
 
     /// Turns the gyroscope on or off. It draws about 0.9 mA, so [`imu`]
@@ -91,9 +92,8 @@ impl Imu {
     /// If the sensor can't be read.
     pub fn rotation(&mut self) -> Result<[i32; 3], Error> {
         let raw = self.gyroscope_raw()?;
-        // ±2000 °/s over the i16 range: 16.384 counts per °/s.
         Ok(array::from_fn(|axis| {
-            (raw[axis] - self.gyroscope_offset[axis]) * 15_625 / 256
+            millidegrees_per_second(raw[axis] - self.gyroscope_offset[axis])
         }))
     }
 

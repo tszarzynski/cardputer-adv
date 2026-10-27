@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- `IrTransmitter::send_raw` sends any remote's code as `(mark, space)` pulses in µs, up to `IrTransmitter::MAX_PULSES` (128); `MAX_DURATION` is the longest mark or space.
+- Host tests: the pure logic (the unit conversions, the LED's and IR codes' pulses, the framebuffer's change tracking) is in modules without esp-hal, which `host-tests/` builds and tests on the host (`just test`, and in CI).
+- CI: `actions/checkout@v5`, `just` from `taiki-e/install-action`, and the runner pinned to Ubuntu 24.04.
+
 ## [0.2.0] - 2026-10-27
 
 - The microphone: `audio` starts the speaker's and the microphone's I2S streams together (`AudioPins`), `Audio::run` plays and hands over what's heard, and `Codec::set_microphone` and `Codec::set_microphone_gain` turn the codec's ADC on and set its preamp.
