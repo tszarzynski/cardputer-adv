@@ -26,7 +26,6 @@ jobs:
           default: true
           buildtargets: esp32s3
           ldproxy: false
-          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: extractions/setup-just@v3
       - uses: Swatinem/rust-cache@v2
       - name: Formatting and clippy

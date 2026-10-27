@@ -22,8 +22,9 @@ hardware:
     {{esp}} && cargo run --release --features sd-card --example hardware
 
 # the API docs, with all the features, in target/xtensa-esp32s3-none-elf/doc/ (docs.rs can't build for Xtensa; CI publishes them to GitHub Pages)
+# The flags go to this crate's rustdoc only: with RUSTDOCFLAGS set, xtensa-lx-rt's build script stops checking the target and sets up the plain ESP32, which later builds reuse.
 doc:
-    {{esp}} && RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo doc --no-deps --all-features
+    {{esp}} && cargo rustdoc --lib --all-features -- --cfg docsrs -D warnings
 
 # what would go to crates.io, checked by building it (publishing itself is `cargo publish`)
 package:
