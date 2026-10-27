@@ -153,6 +153,7 @@ dependencies = [
  "bytemuck",
  "cardputer-adv-keyboard",
  "critical-section",
+ "defmt",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync 0.8.0",

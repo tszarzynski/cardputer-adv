@@ -1,0 +1,62 @@
+# Lints, builds and packages the crate for the ESP32-S3, and publishes its API
+# docs to GitHub Pages from main (docs.rs can't build for Xtensa).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Xtensa toolchain
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: extractions/setup-just@v3
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting and clippy
+        run: just check
+      - name: Build
+        run: just build
+      - name: API docs
+        run: just doc
+      - name: Package
+        run: just package
+      - name: Prepare the docs for Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo '<meta http-equiv="refresh" content="0; url=cardputer_adv/">' \
+            > target/xtensa-esp32s3-none-elf/doc/index.html
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: target/xtensa-esp32s3-none-elf/doc
+
+  pages:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

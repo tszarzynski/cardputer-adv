@@ -44,7 +44,7 @@ pub struct Keyboard {
     missed: u32,
 }
 
-/// Why [`Keyboard::wait_inputs`] went to read the keyboard.
+/// Why [`Keyboard::wait_for_inputs`] went to read the keyboard.
 enum Wake {
     Interrupt,
     Fallback,
@@ -61,7 +61,7 @@ impl Keyboard {
     /// # Errors
     ///
     /// If the TCA8418 can't be read over I2C.
-    pub async fn wait_inputs(&mut self) -> Result<impl Iterator<Item = keys::KeyInput>, Error> {
+    pub async fn wait_for_inputs(&mut self) -> Result<impl Iterator<Item = keys::KeyInput>, Error> {
         loop {
             let wake = if core::mem::take(&mut self.pending) {
                 Wake::Pending
@@ -111,7 +111,7 @@ impl Keyboard {
     /// Makes a key press end a light sleep (esp-hal's
     /// `LowPower::sleep_light`): the interrupt line listens for its low
     /// level, which wakes the chip. Call it just before sleeping; the key is
-    /// then read by [`wait_inputs`](Self::wait_inputs) as usual.
+    /// then read by [`wait_for_inputs`](Self::wait_for_inputs) as usual.
     pub fn listen_for_wake(&mut self) {
         self.interrupt.listen(Event::LowLevel);
     }
@@ -123,9 +123,9 @@ impl Keyboard {
         self.missed
     }
 
-    /// The underlying driver, for anything [`wait_inputs`](Self::wait_inputs)
+    /// The underlying driver, for anything [`wait_for_inputs`](Self::wait_for_inputs)
     /// doesn't cover.
-    pub const fn driver(&mut self) -> &mut keys::Keyboard<I2cDevice> {
+    pub const fn driver_mut(&mut self) -> &mut keys::Keyboard<I2cDevice> {
         &mut self.keys
     }
 }

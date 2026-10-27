@@ -5,7 +5,7 @@
 //!   [`Backlight`], dimmable by PWM. [`frame_display`] feeds it from a
 //!   [`Frame`] by DMA instead.
 //! - [`keyboard`]: the 56-key keyboard (TCA8418 on I2C), with Shift/Fn layers
-//!   from [`keys`]. [`Keyboard::wait_inputs`] sleeps until the TCA8418
+//!   from [`keys`]. [`Keyboard::wait_for_inputs`] sleeps until the TCA8418
 //!   signals a key event on its interrupt line.
 //! - [`imu`]: the BMI270 motion sensor: its accelerometer, in milli-g, and
 //!   its gyroscope, in milli-degrees a second.
@@ -31,7 +31,32 @@
 //!
 //! The async parts need an embassy-time driver, such as esp-rtos's.
 //!
-//! Pins (from the ADV schematic, M5Unified and working firmware):
+//! # Quick start
+//!
+//! ```ignore
+//! use cardputer_adv::{display_pins, i2c_pins, speaker_pins};
+//!
+//! let p = esp_hal::init(esp_hal::Config::default());
+//! // …start esp-rtos (or another embassy-time driver)…
+//! let (mut display, mut backlight) = cardputer_adv::display(display_pins!(p))?;
+//! let bus = cardputer_adv::i2c(i2c_pins!(p))?;
+//! let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11)?;
+//! let mut imu = cardputer_adv::imu(bus)?;
+//! // In a task of its own: the speaker, then the codec it clocks.
+//! let mut speaker = cardputer_adv::speaker(speaker_pins!(p))?;
+//! let mut codec = cardputer_adv::codec(bus)?;
+//!
+//! for key in keyboard.wait_for_inputs().await? { /* … */ }
+//! ```
+//!
+//! # Features
+//!
+//! - `sd-card`: the microSD card (`sd_card`), through embedded-sdmmc.
+//! - `defmt`: `defmt::Format` for [`Error`].
+//!
+//! # Pins
+//!
+//! From the ADV schematic, M5Unified and working firmware:
 //!
 //! | Function | GPIO |
 //! |---|---|
@@ -47,6 +72,7 @@
 //! | microSD SCK / MOSI / MISO / CS | 40 / 14 / 39 / 12 |
 
 #![no_std]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 #![expect(
     clippy::future_not_send,

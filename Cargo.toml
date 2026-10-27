@@ -9,8 +9,8 @@ keywords = ["cardputer", "m5stack", "esp32s3", "esp-hal", "no-std"]
 categories = ["embedded", "hardware-support", "no-std"]
 readme = "README.md"
 repository = "https://github.com/tszarzynski/cardputer-adv"
-# docs.rs can't build for Xtensa: the README is the documentation.
-documentation = "https://github.com/tszarzynski/cardputer-adv#readme"
+# docs.rs can't build for Xtensa: CI publishes the API docs to GitHub Pages.
+documentation = "https://tszarzynski.github.io/cardputer-adv/"
 # The crate itself; the repo's tooling (Justfile, toolchain, CLAUDE.md) stays out.
 include = ["src/**", "README.md", "CHANGELOG.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
@@ -27,6 +27,7 @@ missing_docs = "warn"
 bmi2 = "0.1.2"
 bytemuck = "1.24"
 critical-section = "1.2"
+defmt = { version = "1.1", optional = true }
 cardputer-adv-keyboard = "0.2.6"
 embassy-futures = "0.1.2"
 embassy-time = "0.5.1"
@@ -41,6 +42,8 @@ static_cell = "2.1.1"
 [features]
 # The microSD card, through embedded-sdmmc (`sd_card`).
 sd-card = ["dep:embedded-sdmmc"]
+# `defmt::Format` for `Error`, for apps that log with defmt.
+defmt = ["dep:defmt"]
 
 # For the hardware test (`examples/hardware.rs`), at the versions the apps use.
 [dev-dependencies]

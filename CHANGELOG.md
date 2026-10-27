@@ -12,7 +12,9 @@ follows [Semantic Versioning](https://semver.org/).
 - The G0 button: `button`, `Button::is_pressed`, `Button::wait_for_press` (debounced) and `Button::listen_for_wake`.
 - The microSD card, with the `sd-card` feature: `sd_card` returns an `SdCard`, an embedded-sdmmc `BlockDevice` that starts the card on first use (and again after a failure, for a card inserted or swapped later); `embedded_sdmmc` is re-exported.
 - A macro per part takes its pins out of esp-hal's `Peripherals`: `display_pins!`, `i2c_pins!`, `keyboard_pins!`, `speaker_pins!`, `audio_pins!`, `battery_pins!` and `sd_card_pins!`.
-- Breaking: `enable_codec` is now `codec`, `KeyboardPins` holds the bus's `I2cPins` (`i2c`) instead of its three fields, and `Error::Spi` is `Error::DisplaySpi`.
+- Breaking: `enable_codec` is now `codec`, `KeyboardPins` holds the bus's `I2cPins` (`i2c`) instead of its three fields, `Error::Spi` is `Error::DisplaySpi`, `Keyboard::wait_inputs` is `wait_for_inputs` (as `Button::wait_for_press`), and `Keyboard::driver` is `driver_mut`.
+- The `defmt` feature: `defmt::Format` for `Error`.
+- API docs on GitHub Pages, built by CI (fmt, clippy, the builds, the docs and `cargo package`).
 - Every public type implements `Debug`.
 - `examples/hardware.rs` tries each part on a Cardputer (`just hardware`).
 
