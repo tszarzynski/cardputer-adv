@@ -1,6 +1,20 @@
 # The crate builds only for the Cardputer's ESP32-S3.
 [build]
 target = "xtensa-esp32s3-none-elf"
+# For linking the example (a library doesn't link).
+rustflags = [
+  "-C", "link-arg=-nostartfiles",
+  "-C", "link-arg=-Tlinkall.x",
+  # esp-hal's memory layout has one: expected, not a fault.
+  "-C", "link-arg=-Wl,--no-warn-rwx-segments",
+]
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor --chip esp32s3"
 
 [unstable]
 build-std = ["core"]
+
+# The example's log level.
+[env]
+ESP_LOG = "info"

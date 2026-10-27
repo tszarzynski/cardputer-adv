@@ -4,9 +4,9 @@
 
 ## Before committing
 
-- `just` (fmt check and clippy for the Xtensa target) must pass, and `just build`.
+- `just` (fmt check, and clippy for the Xtensa target with and without `sd-card`, and on the example) must pass, and `just build`.
 - Then build both apps against the change: `just build` and `just clippy` in backgammon, `just cardputer build` and `just cardputer clippy` in chord-detector. A breaking change updates their call sites in the same session.
-- Hardware behaviour can only be checked on a Cardputer: flash one of the apps.
+- Hardware behaviour can only be checked on a Cardputer: `just hardware` flashes `examples/hardware.rs`, which tries each part and logs what it does, or flash one of the apps. A new part gets a line in that example.
 
 ## Conventions
 

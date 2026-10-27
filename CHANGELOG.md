@@ -4,6 +4,16 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate
 follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- The microphone: `audio` starts the speaker's and the microphone's I2S streams together (`AudioPins`), `Audio::run` plays and hands over what's heard, and `Codec::set_microphone` and `Codec::set_microphone_gain` turn the codec's ADC on and set its preamp.
+- The gyroscope: `Imu::set_gyroscope` and `Imu::rotation`, in milli-degrees a second.
+- The RGB LED and the IR transmitter, on the RMT (`rmt`, `RMT_FREQUENCY`): `rgb_led` and `RgbLed::set_color`; `ir_transmitter` and `IrTransmitter::send_nec`, `send_nec_extended` and `send_nec_repeat`.
+- The G0 button: `button`, `Button::is_pressed`, `Button::wait_for_press` (debounced) and `Button::listen_for_wake`.
+- The microSD card, with the `sd-card` feature: `sd_card` returns an `SdCard`, an embedded-sdmmc `BlockDevice` that starts the card on first use (and again after a failure, for a card inserted or swapped later); `embedded_sdmmc` is re-exported.
+- Every public type implements `Debug`.
+- `examples/hardware.rs` tries each part on a Cardputer (`just hardware`).
+
 ## [0.1.0] - 2026-10-26
 
 - First version: display, keyboard (interrupt-driven `wait_inputs`, with a fallback poll), the backlight (`Backlight::set_percent`, 256 Hz PWM) and the battery voltage (`battery`).

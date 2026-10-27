@@ -11,15 +11,15 @@ What the Cardputer ADV has, and what this crate covers so far.
 | LCD, 1.14" ST7789V2, 240×135 | ✅ drawing directly, or a framebuffer sent by DMA; the controller's sleep | `display`, `frame_display`, `Frame`, `FrameDisplay::flush`, `FrameDisplay::set_asleep` |
 | Backlight (GPIO38) | ✅ dimmable, 0–100% | `Backlight::set_percent` |
 | Keyboard, 56 keys (TCA8418) | ✅ Shift and Fn layers, interrupt-driven, wakes the chip from light sleep | `keyboard`, `keyboard_on`, `Keyboard::wait_inputs`, `Keyboard::listen_for_wake` |
-| Motion sensor (BMI270) | ✅ accelerometer, ±8 g at 100 Hz; ❌ gyroscope, motion interrupts | `imu`, `Imu::acceleration` |
+| Motion sensor (BMI270) | ✅ accelerometer, ±8 g at 100 Hz; gyroscope, ±2000 °/s at 100 Hz; ❌ motion interrupts | `imu`, `Imu::acceleration`, `Imu::set_gyroscope`, `Imu::rotation` |
 | Speaker (ES8311 codec, NS4150B amplifier) | ✅ playing samples at 44.1 kHz, volume, output off for sleep | `speaker`, `Speaker::run`, `enable_codec`, `Codec` |
+| Microphone (through the ES8311, I2S in on GPIO46) | ✅ recording at 44.1 kHz, alongside the speaker; preamp gain | `audio`, `Audio::run`, `Codec::set_microphone`, `Codec::set_microphone_gain` |
 | Battery (GPIO10) | ✅ voltage and estimated charge; charging can't be detected (no line for it) | `battery`, `Battery::millivolts`, `Battery::percent` |
 | Shared I2C bus (keyboard, codec, motion sensor) | ✅ | `i2c` |
-| Microphone (through the ES8311, I2S in on GPIO46) | ❌ | |
-| microSD slot (SPI: CS 12, MOSI 14, CLK 40, MISO 39) | ❌ | |
-| IR transmitter (GPIO44) | ❌ | |
-| RGB LED | ❌ (it's powered through GPIO38, so it dims with the backlight) | |
-| G0 button, after boot | ❌ (a plain input on GPIO0) | |
+| microSD slot (SPI: CS 12, MOSI 14, CLK 40, MISO 39) | ✅ FAT files through [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc), with the `sd-card` feature | `sd_card`, `SdCard` |
+| IR transmitter (GPIO44) | ✅ NEC codes on a 38 kHz carrier; ❌ other protocols | `rmt`, `ir_transmitter`, `IrTransmitter::send_nec` |
+| RGB LED (WS2812 on GPIO21) | ✅ any colour; it's powered through GPIO38, so it's lit only while the backlight is | `rmt`, `rgb_led`, `RgbLed::set_color` |
+| G0 button, after boot | ✅ debounced presses, wakes the chip from light sleep | `button`, `Button::wait_for_press` |
 | Grove port (GPIO1, 2) and EXT header | not board-specific: use esp-hal directly | |
 
 ## API
@@ -40,6 +40,12 @@ What the Cardputer ADV has, and what this crate covers so far.
   - `Codec::set_output(false)` powers the codec's DAC and its path to the amplifier down, and `set_output(true)` brings them back. Turn it off before the I2S clock stops (in a light sleep): the codec clocks itself from the stream, and the clock stopping and starting clicks in the speaker.
   - To avoid skips while anything else holds the CPU for longer (drawing a frame straight to the panel takes about 30 ms), run the speaker on a higher-priority executor, such as esp-rtos's `InterruptExecutor`.
 - `i2c(I2cPins)` sets up the I2C bus that the keyboard, codec and motion sensor share. Pass it to `keyboard_on`, `imu` and `enable_codec`. `keyboard(KeyboardPins)` sets the bus up itself, for when the keyboard is all you need.
+- `audio(AudioPins)` starts the speaker's stream and the microphone's together, on the same I2S clocks, and returns an `Audio`. Once `enable_codec` has set the codec up, `Codec::set_microphone(true)` turns its ADC on, and `Codec::set_microphone_gain(db)` sets its preamp (0–30 dB, in 3 dB steps). `Audio::run(fill, take).await` plays what `fill` writes and hands what's heard to `take`, up to 256 mono samples at a time; the two run together because the microphone runs on the speaker's clocks. A stream that falls more than 23 ms behind restarts, so its sound has a gap.
+- `Imu::set_gyroscope(true)` turns the BMI270's gyroscope on (±2000 °/s at 100 Hz; it draws about 0.9 mA, so `imu` leaves it off), and `Imu::rotation()` reads it in milli-degrees a second.
+- `rmt(RMT)` sets up the RMT peripheral for the RGB LED and the IR transmitter; give each one of its transmit channels. `rgb_led(channel, GPIO21)` returns an `RgbLed`, and `RgbLed::set_color(Rgb888).await` sets it (black is off). It's powered through the backlight's switch, so it's lit only while the backlight is, and dims with it.
+- `ir_transmitter(channel, GPIO44)` returns an `IrTransmitter`, which sends NEC codes on a 38 kHz carrier: `send_nec(address, command)`, `send_nec_extended` for a 16-bit address, and `send_nec_repeat` for a held button.
+- `button(GPIO0)` returns the G0 `Button`: `is_pressed()`, `wait_for_press().await` (debounced), and `listen_for_wake()` to wake the chip from light sleep, as `Keyboard::listen_for_wake` does.
+- `sd_card(SdCardPins)`, with the `sd-card` feature, sets up the microSD card's own SPI bus (SPI3) and returns an `SdCard`, an [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc) `BlockDevice`. Read and write FAT files through `embedded_sdmmc::VolumeManager`; the crate re-exports `embedded_sdmmc`, so the versions match. The card is started on first use (at 400 kHz, then run at 20 MHz), and again after a failed access, so it can be inserted or swapped while the app runs. It's blocking, so a long read holds up its executor.
 - `battery(BatteryPins)` measures the battery voltage (`Battery::millivolts()`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does, and `Battery::percent()` the charge left, by M5Unified's estimate (3.30 V empty, 4.10 V full). The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
 
 ```rust
@@ -79,6 +85,27 @@ codec.set_volume(60)?;
 let Err(error) = speaker.run(|samples| samples.fill(0)).await; // runs until it fails
 ```
 
+The microphone, the RGB LED and the IR transmitter:
+
+```rust
+use cardputer_adv::{AudioPins, SpeakerPins};
+use embedded_graphics::pixelcolor::{Rgb888, RgbColor};
+
+let speaker = SpeakerPins { i2s: p.I2S0, dma: p.DMA_CH0, bclk: p.GPIO41, ws: p.GPIO43, dout: p.GPIO42 };
+let mut audio = cardputer_adv::audio(AudioPins { speaker, din: p.GPIO46 })?;
+let mut codec = cardputer_adv::enable_codec(bus)?;
+codec.set_microphone_gain(24)?;
+codec.set_microphone(true)?;
+// In a task: silence out, 44.1 kHz mono in.
+let Err(error) = audio.run(|out| out.fill(0), |heard| { /* … */ }).await;
+
+let rmt = cardputer_adv::rmt(p.RMT)?;
+let mut led = cardputer_adv::rgb_led(rmt.channel0, p.GPIO21)?;
+let mut ir = cardputer_adv::ir_transmitter(rmt.channel1, p.GPIO44)?;
+led.set_color(Rgb888::GREEN).await?;
+ir.send_nec(0x00, 0x45).await?;
+```
+
 With a framebuffer, sent by DMA:
 
 ```rust
@@ -98,7 +125,8 @@ loop {
 
 ## Requirements
 
-- esp-hal 1.2, with its `unstable` feature (LEDC, I2S and light sleep are behind it), on an ESP32-S3.
+- esp-hal 1.2, with its `unstable` feature (LEDC, I2S, RMT and light sleep are behind it), on an ESP32-S3.
+- The `sd-card` feature, for the microSD card. It's off by default, so apps without a card don't build embedded-sdmmc.
 - An embassy-time driver, for the async parts (`Keyboard::wait_inputs`, `FrameDisplay::flush`, `Speaker::run`): esp-rtos's, say.
 - `Display` is a [mipidsi](https://crates.io/crates/mipidsi) type; the crate re-exports `mipidsi`, so you can name its types without depending on it yourself.
 
@@ -139,13 +167,17 @@ While the chip sleeps its USB is off (no log, no flashing until it wakes), and t
 | Battery voltage (ADC1, 2:1 divider) | 10 |
 | I2C SDA / SCL (keyboard, ES8311 codec, BMI270 IMU) | 8 / 9 |
 | Keyboard interrupt | 11 |
-| I2S BCLK / WS / DOUT, to the ES8311 (no MCLK: it clocks from BCLK) | 41 / 43 / 42 |
+| I2S BCLK / WS / DOUT / DIN, the ES8311 (no MCLK: it clocks from BCLK) | 41 / 43 / 42 / 46 |
+| G0 button | 0 |
+| RGB LED (WS2812) | 21 |
+| IR LED | 44 |
+| microSD SCK / MOSI / MISO / CS (SPI3) | 40 / 14 / 39 / 12 |
 
 The I2C bus is a `critical_section::Mutex`, shared by embedded-hal-bus's `CriticalSectionDevice`s, so the keyboard, the codec and the motion sensor can be used from any executor or core. Each transfer holds the critical section, which delays interrupts by about 0.3 ms for a key or motion read. The motion sensor's start-up holds it for 3 ms per 128-byte burst.
 
 ## Status
 
-The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). The display and the keyboard, including its interrupt line, work on a Cardputer ADV (tested October 2026). So do the motion sensor and the speaker. `imu` tries the BMI270's two addresses, 0x68 then 0x69, because sources disagree on which one the ADV uses (espp says 0x68, oxstack 0x69). The ES8311 sequence is M5Unified's Cardputer ADV speaker enable, as [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver uses it. The battery reading is new and not yet checked against a multimeter.
+The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). The display and the keyboard, including its interrupt line, work on a Cardputer ADV (tested October 2026). So do the motion sensor and the speaker. `imu` tries the BMI270's two addresses, 0x68 then 0x69, because sources disagree on which one the ADV uses (espp says 0x68, oxstack 0x69). The ES8311 sequence is M5Unified's Cardputer ADV speaker enable, as [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver uses it. The battery reading is new and not yet checked against a multimeter. The pins for the microphone, the microSD card, the IR LED, the RGB LED and G0 are M5Unified's for the ADV, and the microphone's codec sequence is its microphone enable. `examples/hardware.rs` (`just hardware`) tries each of these parts and logs what it does.
 
 ## Documentation
 

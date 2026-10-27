@@ -1,7 +1,7 @@
 [package]
 name = "cardputer-adv"
 version = "0.1.0"
-description = "Board support for the M5Stack Cardputer ADV (ESP32-S3) on esp-hal: display, keyboard, motion sensor, speaker, backlight and battery voltage"
+description = "Board support for the M5Stack Cardputer ADV (ESP32-S3) on esp-hal: display, keyboard, motion sensor, speaker, microphone, RGB LED, IR, microSD, backlight and battery"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -33,6 +33,29 @@ embassy-time = "0.5.1"
 embedded-graphics-core = "0.4"
 embedded-hal = "1.0"
 embedded-hal-bus = "0.3"
+embedded-sdmmc = { version = "0.10", default-features = false, optional = true }
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "unstable"] }
 mipidsi = "0.10"
 static_cell = "2.1.1"
+
+[features]
+# The microSD card, through embedded-sdmmc (`sd_card`).
+sd-card = ["dep:embedded-sdmmc"]
+
+# For the hardware test (`examples/hardware.rs`), at the versions the apps use.
+[dev-dependencies]
+embassy-executor = "0.10.0"
+embassy-sync = "0.8"
+embedded-graphics = "0.8.2"
+esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
+esp-println = { version = "0.18.0", features = ["esp32s3", "log-04"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp32s3", "log-04"] }
+log = "0.4.27"
+
+[[example]]
+name = "hardware"
+required-features = ["sd-card"]
+
+[profile.release]
+debug = 2
