@@ -20,7 +20,7 @@ What the Cardputer ADV has, and what this crate covers so far.
 | Microphone (through the ES8311, I2S in on GPIO46) | ✅ recording at 44.1 kHz, alongside the speaker; preamp gain | `audio`, `Audio::run`, `Codec::set_microphone`, `Codec::set_microphone_gain` |
 | Battery (GPIO10) | ✅ voltage and estimated charge; charging can't be detected (no line for it) | `battery`, `Battery::millivolts`, `Battery::percent` |
 | Shared I2C bus (keyboard, codec, motion sensor) | ✅ | `i2c` |
-| microSD slot (SPI: CS 12, MOSI 14, CLK 40, MISO 39) | ✅ FAT files through [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc), with the `sd-card` feature | `sd_card`, `SdCard` |
+| microSD slot (SPI: CS 12, MOSI 14, CLK 40, MISO 39) | ⚠️ FAT files through [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc), with the `sd-card` feature; not yet tested on hardware | `sd_card`, `SdCard` |
 | IR transmitter (GPIO44) | ✅ NEC codes on a 38 kHz carrier; ❌ other protocols | `rmt`, `ir_transmitter`, `IrTransmitter::send_nec` |
 | RGB LED (WS2812 on GPIO21) | ✅ any colour; it's powered through GPIO38, so it's lit only while the backlight is | `rmt`, `rgb_led`, `RgbLed::set_color` |
 | G0 button, after boot | ✅ debounced presses, wakes the chip from light sleep | `button`, `Button::wait_for_press` |
@@ -175,7 +175,7 @@ The I2C bus is a `critical_section::Mutex`, shared by embedded-hal-bus's `Critic
 
 ## Status
 
-The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). The display and the keyboard, including its interrupt line, work on a Cardputer ADV (tested October 2026). So do the motion sensor and the speaker. `imu` tries the BMI270's two addresses, 0x68 then 0x69, because sources disagree on which one the ADV uses (espp says 0x68, oxstack 0x69). The ES8311 sequence is M5Unified's Cardputer ADV speaker enable, as [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver uses it. The battery reading is new and not yet checked against a multimeter. The pins for the microphone, the microSD card, the IR LED, the RGB LED and G0 are M5Unified's for the ADV, and the microphone's codec sequence is its microphone enable. `examples/hardware.rs` (`just hardware`) tries each of these parts and logs what it does.
+The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). The display and the keyboard, including its interrupt line, work on a Cardputer ADV (tested October 2026). So do the motion sensor and the speaker. `imu` tries the BMI270's two addresses, 0x68 then 0x69, because sources disagree on which one the ADV uses (espp says 0x68, oxstack 0x69). The ES8311 sequence is M5Unified's Cardputer ADV speaker enable, as [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver uses it. The battery reading is new and not yet checked against a multimeter. The pins for the microphone, the microSD card, the IR LED, the RGB LED and G0 are M5Unified's for the ADV, and the microphone's codec sequence is its microphone enable. The microphone, the gyroscope, G0, the RGB LED and IR transmission work on the ADV too (tested October 2026; the IR LED's light itself not yet seen). The microSD card hasn't been tested on hardware yet. `examples/hardware.rs` (`just hardware`) tries each of these parts, showing its steps and readings on the screen.
 
 ## Documentation
 

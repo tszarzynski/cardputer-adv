@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-27
+
 - The microphone: `audio` starts the speaker's and the microphone's I2S streams together (`AudioPins`), `Audio::run` plays and hands over what's heard, and `Codec::set_microphone` and `Codec::set_microphone_gain` turn the codec's ADC on and set its preamp.
 - The gyroscope: `Imu::set_gyroscope` and `Imu::rotation`, in milli-degrees a second, and `Imu::calibrate_gyroscope`, which takes off its offset at rest.
 - The RGB LED and the IR transmitter, on the RMT (`rmt`, `RMT_FREQUENCY`): `rgb_led` and `RgbLed::set_color`; `ir_transmitter` and `IrTransmitter::send_nec`, `send_nec_extended` and `send_nec_repeat`.
