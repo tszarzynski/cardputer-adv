@@ -1,8 +1,57 @@
 //! The pulse trains the RMT sends, worked out apart from it: a WS2812
-//! colour's bits, and remote-control codes as `(mark, space)` pairs, the
-//! carrier on for `mark` µs and then off for `space` µs.
+//! colour's bits, and remote-control codes as [`Pulse`]s.
 
 use core::iter;
+
+/// One pulse of an IR code: the carrier on for `mark_us` µs, then off for
+/// `space_us` µs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Pulse {
+    /// How long the carrier is on, in µs.
+    pub mark_us: u16,
+    /// How long it's off after, in µs.
+    pub space_us: u16,
+}
+
+impl Pulse {
+    /// The carrier on for `mark_us` µs, then off for `space_us` µs.
+    #[must_use]
+    pub const fn new(mark_us: u16, space_us: u16) -> Self {
+        Self { mark_us, space_us }
+    }
+}
+
+/// An NEC remote-control code: an 8-bit `address` and a `command`, each
+/// sent followed by its inverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct NecCode {
+    /// The device it's for.
+    pub address: u8,
+    /// The button.
+    pub command: u8,
+}
+
+/// An extended NEC code, whose 16-bit `address` takes the place of the
+/// 8-bit address and its inverse, as many devices use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct ExtendedNecCode {
+    /// The device it's for.
+    pub address: u16,
+    /// The button, sent followed by its inverse.
+    pub command: u8,
+}
+
+impl From<NecCode> for ExtendedNecCode {
+    fn from(NecCode { address, command }: NecCode) -> Self {
+        Self {
+            address: u16::from_le_bytes([address, !address]),
+            command,
+        }
+    }
+}
 
 /// The longest mark or space the RMT can time: 15 bits of 1 µs ticks.
 pub const MAX_DURATION: u16 = 0x7FFF;
@@ -12,13 +61,13 @@ pub const MAX_DURATION: u16 = 0x7FFF;
 pub const MAX_RAW_PULSES: usize = 128;
 
 /// NEC's start: a 9 ms burst, then 4.5 ms off.
-pub const NEC_START: (u16, u16) = (9000, 4500);
+pub const NEC_START: Pulse = Pulse::new(9000, 4500);
 /// NEC's repeat code's start, sent alone while a button is held.
-pub const NEC_REPEAT: (u16, u16) = (9000, 2250);
-const NEC_ZERO: (u16, u16) = (562, 563);
-const NEC_ONE: (u16, u16) = (562, 1688);
+pub const NEC_REPEAT: Pulse = Pulse::new(9000, 2250);
+const NEC_ZERO: Pulse = Pulse::new(562, 563);
+const NEC_ONE: Pulse = Pulse::new(562, 1688);
 /// The burst that closes the last space; nothing follows it.
-pub const NEC_STOP: (u16, u16) = (562, 0);
+pub const NEC_STOP: Pulse = Pulse::new(562, 0);
 
 /// A WS2812 colour's 24 bits as it takes them: green, red, then blue, each
 /// most significant bit first.
@@ -27,10 +76,10 @@ pub fn ws2812_bits(red: u8, green: u8, blue: u8) -> impl Iterator<Item = bool> {
     (0..24).rev().map(move |bit| (grb >> bit) & 1 == 1)
 }
 
-/// An extended NEC code's pulses: the start, the 16-bit `address`, then
-/// `command` and its inverse, each least significant bit first, and the
-/// stop burst. 34 pairs.
-pub fn nec(address: u16, command: u8) -> impl Iterator<Item = (u16, u16)> {
+/// An extended NEC code's pulses: the start, the 16-bit address, then the
+/// command and its inverse, each least significant bit first, and the stop
+/// burst. 34 pulses.
+pub fn nec(ExtendedNecCode { address, command }: ExtendedNecCode) -> impl Iterator<Item = Pulse> {
     let [low, high] = address.to_le_bytes();
     let data = u32::from_le_bytes([low, high, command, !command]);
     let bits = (0..32).map(move |bit| {
@@ -48,17 +97,17 @@ pub fn nec(address: u16, command: u8) -> impl Iterator<Item = (u16, u16)> {
 /// Whether `pulses` can be sent as a raw code: at most [`MAX_RAW_PULSES`],
 /// each mark and space at most [`MAX_DURATION`], and none of them zero
 /// (the RMT takes a zero as the end), but for the last space.
-pub fn is_sendable(pulses: &[(u16, u16)]) -> bool {
+pub fn is_sendable(pulses: &[Pulse]) -> bool {
     let in_range = |duration: u16| (1..=MAX_DURATION).contains(&duration);
-    let Some((&(last_mark, last_space), rest)) = pulses.split_last() else {
+    let Some((last, rest)) = pulses.split_last() else {
         return false;
     };
     pulses.len() <= MAX_RAW_PULSES
         && rest
             .iter()
-            .all(|&(mark, space)| in_range(mark) && in_range(space))
-        && in_range(last_mark)
-        && last_space <= MAX_DURATION
+            .all(|pulse| in_range(pulse.mark_us) && in_range(pulse.space_us))
+        && in_range(last.mark_us)
+        && last.space_us <= MAX_DURATION
 }
 
 #[cfg(test)]
@@ -78,7 +127,11 @@ mod tests {
 
     #[test]
     fn nec_sends_the_address_and_command_and_their_inverses() {
-        let pulses: Vec<_> = nec(u16::from_le_bytes([0x00, !0x00]), 0x45).collect();
+        let code = NecCode {
+            address: 0x00,
+            command: 0x45,
+        };
+        let pulses: Vec<_> = nec(code.into()).collect();
         assert_eq!(pulses.len(), 34);
         assert_eq!(pulses[0], NEC_START);
         assert_eq!(pulses[33], NEC_STOP);
@@ -99,21 +152,22 @@ mod tests {
         // Every code has 16 ones and 16 zeros: 68 ms in all.
         let total: u32 = pulses
             .iter()
-            .map(|&(mark, space)| u32::from(mark) + u32::from(space))
+            .map(|pulse| u32::from(pulse.mark_us) + u32::from(pulse.space_us))
             .sum();
         assert_eq!(total, 68_062);
     }
 
     #[test]
     fn raw_codes_must_fit_the_rmt() {
-        assert!(is_sendable(&[(9000, 4500), (562, 0)]));
-        assert!(is_sendable(&[(MAX_DURATION, MAX_DURATION)]));
+        let pulse = Pulse::new;
+        assert!(is_sendable(&[pulse(9000, 4500), pulse(562, 0)]));
+        assert!(is_sendable(&[pulse(MAX_DURATION, MAX_DURATION)]));
         assert!(!is_sendable(&[]));
         // A zero ends the code early, unless it's the last space.
-        assert!(!is_sendable(&[(9000, 0), (562, 0)]));
-        assert!(!is_sendable(&[(0, 4500)]));
-        assert!(!is_sendable(&[(MAX_DURATION + 1, 100)]));
-        assert!(is_sendable(&[(500, 500); MAX_RAW_PULSES]));
-        assert!(!is_sendable(&[(500, 500); MAX_RAW_PULSES + 1]));
+        assert!(!is_sendable(&[pulse(9000, 0), pulse(562, 0)]));
+        assert!(!is_sendable(&[pulse(0, 4500)]));
+        assert!(!is_sendable(&[pulse(MAX_DURATION + 1, 100)]));
+        assert!(is_sendable(&[pulse(500, 500); MAX_RAW_PULSES]));
+        assert!(!is_sendable(&[pulse(500, 500); MAX_RAW_PULSES + 1]));
     }
 }

@@ -8,7 +8,7 @@ use esp_hal::{
     peripherals::{ADC1, GPIO10},
 };
 
-use crate::convert::battery_percent;
+use crate::{Millivolts, Percent, convert::battery_percent};
 
 /// The peripherals the battery measurement uses.
 #[derive(Debug)]
@@ -19,7 +19,7 @@ pub struct BatteryPins {
     pub pin: GPIO10<'static>,
 }
 
-/// How many readings [`Battery::millivolts`] averages.
+/// How many readings [`Battery::voltage`] averages.
 const BATTERY_SAMPLES: u32 = 16;
 
 /// The battery voltage, measured as M5Stack's M5Unified does for the
@@ -30,24 +30,24 @@ pub struct Battery {
 }
 
 impl Battery {
-    /// The battery voltage in millivolts, averaged over a few readings.
+    /// The battery voltage, averaged over a few readings.
     ///
     /// The board can't tell whether it's charging: on USB with the power
     /// switch on, this is the charging voltage, close to full.
-    pub fn millivolts(&mut self) -> u16 {
+    pub fn voltage(&mut self) -> Millivolts {
         let sum: u32 = (0..BATTERY_SAMPLES)
             .map(|_| u32::from(self.adc.read_blocking(&mut self.pin)))
             .sum();
-        u16::try_from(sum / BATTERY_SAMPLES * 2).unwrap_or(u16::MAX)
+        Millivolts(u16::try_from(sum / BATTERY_SAMPLES * 2).unwrap_or(u16::MAX))
     }
 
-    /// The charge left, in percent, estimated from [`millivolts`](Self::millivolts)
+    /// The charge left, estimated from the [`voltage`](Self::voltage)
     /// ([`battery_percent`]). Reads high on USB, where it can't be told from
     /// charging.
     ///
     /// [`battery_percent`]: crate::battery_percent
-    pub fn percent(&mut self) -> u8 {
-        battery_percent(self.millivolts())
+    pub fn percent(&mut self) -> Percent {
+        battery_percent(self.voltage())
     }
 }
 

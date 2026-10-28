@@ -19,6 +19,9 @@ mod frame;
 mod panel;
 #[path = "../src/pulses.rs"]
 mod pulses;
+#[path = "../src/units.rs"]
+mod units;
 
 pub use frame::Frame;
 pub use panel::{HEIGHT, WIDTH};
+pub use units::{Decibels, Millivolts, Percent};

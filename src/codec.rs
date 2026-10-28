@@ -7,7 +7,7 @@ use embedded_hal::i2c::I2c as _;
 use embedded_hal_bus::i2c::CriticalSectionDevice;
 
 use crate::{
-    Error, I2cBus, I2cDevice,
+    Decibels, Error, I2cBus, I2cDevice, Percent,
     convert::{microphone_gain_step, volume_register},
 };
 
@@ -44,14 +44,15 @@ pub struct Codec {
 }
 
 impl Codec {
-    /// Sets the speaker's level, 0 (silent, −95.5 dB) to 100 (0 dB, the
-    /// level [`codec`] starts at), evenly in decibels.
+    /// Sets the speaker's level, from [`Percent::ZERO`] (silent, −95.5 dB)
+    /// to [`Percent::FULL`] (0 dB, the level [`codec`] starts at), evenly in
+    /// decibels.
     ///
     /// # Errors
     ///
     /// If the codec doesn't answer.
-    pub fn set_volume(&mut self, percent: u8) -> Result<(), Error> {
-        self.write(&[[ES8311_DAC_VOLUME, volume_register(percent)]])
+    pub fn set_volume(&mut self, volume: Percent) -> Result<(), Error> {
+        self.write(&[[ES8311_DAC_VOLUME, volume_register(volume)]])
     }
 
     /// Turns the output to the amplifier off (`on = false`), or back on as
@@ -108,8 +109,8 @@ impl Codec {
     /// # Errors
     ///
     /// If the codec doesn't answer.
-    pub fn set_microphone_gain(&mut self, db: u8) -> Result<(), Error> {
-        self.microphone_gain = microphone_gain_step(db);
+    pub fn set_microphone_gain(&mut self, gain: Decibels) -> Result<(), Error> {
+        self.microphone_gain = microphone_gain_step(gain);
         self.write(&[[ES8311_ADC_PGA, MIC1 | self.microphone_gain]])
     }
 
@@ -155,7 +156,7 @@ pub fn codec(bus: &'static I2cBus) -> Result<Codec, Error> {
 impl fmt::Debug for Codec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Codec")
-            .field("microphone_gain_db", &(self.microphone_gain * 3))
+            .field("microphone_gain", &Decibels(self.microphone_gain * 3))
             .finish_non_exhaustive()
     }
 }

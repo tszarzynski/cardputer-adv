@@ -20,9 +20,9 @@ use crate::{
 /// 13 ms (64.8 kB at 40 MHz), during which other tasks run.
 #[derive(Debug)]
 pub struct FrameDisplay {
-    spi: SpiDma<'static, Async>,
+    bus: Bus,
+    /// The panel's chip select, low while it's [`Selected`].
     cs: Output<'static>,
-    dc: Output<'static>,
     /// Held high: the panel resets while it's low.
     _reset: Output<'static>,
 }
@@ -47,18 +47,66 @@ impl FrameDisplay {
     /// Sends the rows of `frame` that changed since the last flush, each run
     /// of changed rows as one rectangle, as wide as what was drawn on them.
     ///
-    /// If this is cancelled, the rows not yet sent are sent next time.
+    /// If this is cancelled, the panel is deselected, and the rows not yet
+    /// sent are sent next time.
     ///
     /// # Errors
     ///
     /// If the SPI transfer fails; the rows not sent stay changed.
     pub async fn flush(&mut self, frame: &mut Frame) -> Result<(), Error> {
-        self.cs.set_low();
-        let sent = self.send(frame).await;
-        self.cs.set_high();
-        sent
+        let _selected = Selected::new(&mut self.cs);
+        self.bus.send(frame).await
     }
 
+    /// Puts the panel's controller to sleep (`asleep`), keeping the picture
+    /// in its memory, or wakes it. Asleep it draws a few microamps instead
+    /// of a few milliamps; turn the [`Backlight`] off first, as the panel
+    /// shows nothing meanwhile.
+    ///
+    /// Returns once the controller can take the next command (5 ms). It
+    /// shouldn't be put back to sleep within 120 ms of waking.
+    ///
+    /// # Errors
+    ///
+    /// If the SPI transfer fails.
+    pub async fn set_asleep(&mut self, asleep: bool) -> Result<(), Error> {
+        let sent = {
+            let _selected = Selected::new(&mut self.cs);
+            self.bus
+                .command(if asleep { SLPIN } else { SLPOUT }, &[])
+                .await
+        };
+        Timer::after(Duration::from_millis(5)).await;
+        sent
+    }
+}
+
+/// The panel selected: its chip select is low until this is dropped, even
+/// when the transfer it was for is cancelled, so the panel always starts
+/// the next one at a byte boundary.
+struct Selected<'a>(&'a mut Output<'static>);
+
+impl<'a> Selected<'a> {
+    fn new(cs: &'a mut Output<'static>) -> Self {
+        cs.set_low();
+        Self(cs)
+    }
+}
+
+impl Drop for Selected<'_> {
+    fn drop(&mut self) {
+        self.0.set_high();
+    }
+}
+
+/// The SPI bus to the panel, and its data/command line.
+#[derive(Debug)]
+struct Bus {
+    spi: SpiDma<'static, Async>,
+    dc: Output<'static>,
+}
+
+impl Bus {
     async fn send(&mut self, frame: &mut Frame) -> Result<(), Error> {
         let mut from = 0;
         while let Some(run) = frame.next_run(from) {
@@ -84,25 +132,6 @@ impl FrameDisplay {
             }
             Ok(())
         }
-    }
-
-    /// Puts the panel's controller to sleep (`asleep`), keeping the picture
-    /// in its memory, or wakes it. Asleep it draws a few microamps instead
-    /// of a few milliamps; turn the [`Backlight`] off first, as the panel
-    /// shows nothing meanwhile.
-    ///
-    /// Returns once the controller can take the next command (5 ms). It
-    /// shouldn't be put back to sleep within 120 ms of waking.
-    ///
-    /// # Errors
-    ///
-    /// If the SPI transfer fails.
-    pub async fn set_asleep(&mut self, asleep: bool) -> Result<(), Error> {
-        self.cs.set_low();
-        let sent = self.command(if asleep { SLPIN } else { SLPOUT }, &[]).await;
-        self.cs.set_high();
-        Timer::after(Duration::from_millis(5)).await;
-        sent
     }
 
     /// Selects the rectangle the next pixels fill, row by row.
@@ -169,9 +198,11 @@ pub fn frame_display(
     init_panel(SpiInterface::new(device, &mut dc, &mut buffer), &mut reset)?;
     Ok((
         FrameDisplay {
-            spi: spi.into_async(),
+            bus: Bus {
+                spi: spi.into_async(),
+                dc,
+            },
             cs,
-            dc,
             _reset: reset,
         },
         backlight,

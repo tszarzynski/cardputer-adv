@@ -1,25 +1,27 @@
 //! Conversions between the parts' raw readings and settings, and units.
 
-/// The charge left in percent for the battery at `millivolts`: M5Stack's
-/// estimate for the Cardputer (M5Unified's `Power_Class::getBatteryLevel`),
-/// 3.30 V empty, 4.10 V full, linear in between.
+use crate::units::{Decibels, Millivolts, Percent};
+
+/// The charge left for the battery at `voltage`: M5Stack's estimate for
+/// the Cardputer (M5Unified's `Power_Class::getBatteryLevel`), 3.30 V
+/// empty, 4.10 V full, linear in between.
 #[must_use]
-pub fn battery_percent(millivolts: u16) -> u8 {
-    let level = (i32::from(millivolts) - 3300) * 100 / 800;
-    u8::try_from(level.clamp(0, 100)).unwrap_or(100)
+pub fn battery_percent(voltage: Millivolts) -> Percent {
+    let level = (i32::from(voltage.0) - 3300) * 100 / 800;
+    Percent::new(u8::try_from(level.clamp(0, 100)).unwrap_or(100))
 }
 
-/// The ES8311's DAC volume register for `percent`, 0 (−95.5 dB) to 100
-/// (0 dB, register 0xBF), evenly in decibels; more than 100 is 100.
-pub fn volume_register(percent: u8) -> u8 {
-    let step = u16::from(percent.min(100)) * 0xBF / 100;
+/// The ES8311's DAC volume register for `volume`, 0% (−95.5 dB) to 100%
+/// (0 dB, register 0xBF), evenly in decibels.
+pub fn volume_register(volume: Percent) -> u8 {
+    let step = u16::from(volume.get()) * 0xBF / 100;
     u8::try_from(step).unwrap_or(0xBF)
 }
 
-/// The ES8311 microphone preamp's gain step for `db`: 0 to 10, 3 dB each,
-/// rounded down; more than 30 dB is 30.
-pub const fn microphone_gain_step(db: u8) -> u8 {
-    if db > 30 { 10 } else { db / 3 }
+/// The ES8311 microphone preamp's gain step for `gain`: 0 to 10, 3 dB
+/// each, rounded down; more than 30 dB is 30.
+pub const fn microphone_gain_step(gain: Decibels) -> u8 {
+    if gain.0 > 30 { 10 } else { gain.0 / 3 }
 }
 
 /// A BMI270 acceleration reading at ±8 g (4096 counts a g), in milli-g.
@@ -39,30 +41,32 @@ mod tests {
 
     #[test]
     fn the_battery_is_empty_at_3_3_volts_and_full_at_4_1() {
-        assert_eq!(battery_percent(0), 0);
-        assert_eq!(battery_percent(3300), 0);
-        assert_eq!(battery_percent(3700), 50);
-        assert_eq!(battery_percent(4100), 100);
+        let percent = |millivolts| battery_percent(Millivolts(millivolts)).get();
+        assert_eq!(percent(0), 0);
+        assert_eq!(percent(3300), 0);
+        assert_eq!(percent(3700), 50);
+        assert_eq!(percent(4100), 100);
         // On USB it reads the charging voltage.
-        assert_eq!(battery_percent(4200), 100);
-        assert_eq!(battery_percent(u16::MAX), 100);
+        assert_eq!(percent(4200), 100);
+        assert_eq!(percent(u16::MAX), 100);
     }
 
     #[test]
     fn the_volume_runs_from_silent_to_0_db() {
-        assert_eq!(volume_register(0), 0x00);
-        assert_eq!(volume_register(50), 0x5F);
-        assert_eq!(volume_register(100), 0xBF);
-        assert_eq!(volume_register(255), 0xBF);
+        assert_eq!(volume_register(Percent::ZERO), 0x00);
+        assert_eq!(volume_register(Percent::new(50)), 0x5F);
+        assert_eq!(volume_register(Percent::FULL), 0xBF);
+        assert_eq!(volume_register(Percent::new(255)), 0xBF);
     }
 
     #[test]
     fn the_microphone_gain_rounds_down_to_3_db_steps() {
-        assert_eq!(microphone_gain_step(0), 0);
-        assert_eq!(microphone_gain_step(2), 0);
-        assert_eq!(microphone_gain_step(24), 8);
-        assert_eq!(microphone_gain_step(30), 10);
-        assert_eq!(microphone_gain_step(255), 10);
+        let step = |db| microphone_gain_step(Decibels(db));
+        assert_eq!(step(0), 0);
+        assert_eq!(step(2), 0);
+        assert_eq!(step(24), 8);
+        assert_eq!(step(30), 10);
+        assert_eq!(step(255), 10);
     }
 
     #[test]

@@ -102,6 +102,7 @@ mod remote;
 #[cfg(feature = "sd-card")]
 mod sd_card;
 mod speaker;
+mod units;
 
 pub use audio::{Audio, AudioPins, audio};
 pub use battery::{Battery, BatteryPins, battery};
@@ -129,7 +130,9 @@ pub use led::{RgbLed, rgb_led};
 /// without matching its version.
 pub use mipidsi;
 pub use panel::{HEIGHT, WIDTH};
+pub use pulses::{ExtendedNecCode, NecCode, Pulse};
 pub use remote::{RMT_FREQUENCY, rmt};
 #[cfg(feature = "sd-card")]
 pub use sd_card::{SdCard, SdCardPins, sd_card};
 pub use speaker::{SAMPLE_RATE, Speaker, SpeakerPins, speaker};
+pub use units::{Acceleration, Decibels, Millivolts, Percent, Rotation};

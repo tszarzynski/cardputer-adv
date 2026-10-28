@@ -78,25 +78,21 @@ impl Speaker {
                 restarted();
                 continue;
             }
-            loop {
-                let pushed = transfer.push_with(|bytes| {
-                    // Stereo frames, the same sample left and right. The
-                    // chunks are multiples of 4 bytes, so a frame never
-                    // straddles two, and while there is room, there is
-                    // room for a whole frame.
-                    debug_assert!(bytes.is_empty() || bytes.len() >= 4);
-                    let frames = (bytes.len() / 4).min(mono.len());
-                    fill(&mut mono[..frames]);
-                    for (frame, sample) in bytes.chunks_exact_mut(4).zip(&mono[..frames]) {
-                        let [lo, hi] = sample.to_le_bytes();
-                        frame.copy_from_slice(&[lo, hi, lo, hi]);
-                    }
-                    frames * 4
-                });
-                if pushed == 0 {
-                    break;
+            // As much as there's room for.
+            while transfer.push_with(|bytes| {
+                // Stereo frames, the same sample left and right. The chunks
+                // are multiples of 4 bytes, so a frame never straddles two,
+                // and while there is room, there is room for a whole frame.
+                debug_assert!(bytes.is_empty() || bytes.len() >= 4);
+                let frames = (bytes.len() / 4).min(mono.len());
+                fill(&mut mono[..frames]);
+                for (frame, sample) in bytes.chunks_exact_mut(4).zip(&mono[..frames]) {
+                    let [lo, hi] = sample.to_le_bytes();
+                    frame.copy_from_slice(&[lo, hi, lo, hi]);
                 }
-            }
+                frames * 4
+            }) > 0
+            {}
         }
     }
 

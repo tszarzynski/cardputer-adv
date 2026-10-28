@@ -30,7 +30,7 @@ use mipidsi::{
 use static_cell::StaticCell;
 
 use crate::{
-    Error,
+    Error, Percent,
     panel::{HEIGHT, PANEL_OFFSET, WIDTH},
 };
 
@@ -66,14 +66,15 @@ pub struct Backlight {
 }
 
 impl Backlight {
-    /// Sets the brightness, 0 (off) to 100 (full).
+    /// Sets the brightness, from [`Percent::ZERO`] (off) to
+    /// [`Percent::FULL`].
     ///
     /// # Errors
     ///
     /// If LEDC rejects the duty (it can't, for 0–100).
-    pub fn set_percent(&mut self, percent: u8) -> Result<(), Error> {
+    pub fn set_brightness(&mut self, brightness: Percent) -> Result<(), Error> {
         self.channel
-            .set_duty(percent.min(100))
+            .set_duty(brightness.get())
             .map_err(|_| Error::Backlight)
     }
 }

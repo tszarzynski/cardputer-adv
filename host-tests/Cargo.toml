@@ -18,6 +18,10 @@ path = "lib.rs"
 bytemuck = "1.24"
 embedded-graphics-core = "0.4"
 
+# The crate's own features that its pure modules mention; off here.
+[features]
+defmt = []
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }

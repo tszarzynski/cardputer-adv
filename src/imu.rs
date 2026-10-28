@@ -15,7 +15,7 @@ use embedded_hal_bus::i2c::CriticalSectionDevice;
 use esp_hal::delay::Delay;
 
 use crate::{
-    Error, I2cBus, I2cDevice,
+    Acceleration, Error, I2cBus, I2cDevice, Rotation,
     convert::{milli_g, millidegrees_per_second},
 };
 
@@ -42,15 +42,15 @@ pub struct Imu {
 }
 
 impl Imu {
-    /// The acceleration now, in milli-g, as (x, y, z) in the sensor's axes.
-    /// At rest it is about 1000 mg in total: gravity.
+    /// The acceleration now. At rest it is about 1000 mg in total: gravity.
     ///
     /// # Errors
     ///
     /// If the sensor can't be read.
-    pub fn acceleration(&mut self) -> Result<[i32; 3], Error> {
+    pub fn acceleration(&mut self) -> Result<Acceleration, Error> {
         let data = self.bmi.get_acc_data().map_err(|_| Error::Imu)?;
-        Ok([data.x, data.y, data.z].map(|raw| milli_g(i32::from(raw))))
+        let [x, y, z] = [data.x, data.y, data.z].map(|raw| milli_g(i32::from(raw)));
+        Ok(Acceleration { x, y, z })
     }
 
     /// Turns the gyroscope on or off. It draws about 0.9 mA, so [`imu`]
@@ -79,8 +79,7 @@ impl Imu {
         self.set_power(on)
     }
 
-    /// The rotation rate now, in milli-degrees a second, as (x, y, z) about
-    /// the sensor's axes.
+    /// The rotation rate now.
     ///
     /// Uncalibrated, it can read several degrees a second while still (from
     /// 0.5 to 9 °/s in different runs on the ADV tested); after
@@ -90,11 +89,11 @@ impl Imu {
     /// # Errors
     ///
     /// If the sensor can't be read.
-    pub fn rotation(&mut self) -> Result<[i32; 3], Error> {
+    pub fn rotation(&mut self) -> Result<Rotation, Error> {
         let raw = self.gyroscope_raw()?;
-        Ok(array::from_fn(|axis| {
-            millidegrees_per_second(raw[axis] - self.gyroscope_offset[axis])
-        }))
+        let [x, y, z] =
+            array::from_fn(|axis| millidegrees_per_second(raw[axis] - self.gyroscope_offset[axis]));
+        Ok(Rotation { x, y, z })
     }
 
     /// Measures the gyroscope's offset (what it reads at rest), and takes it

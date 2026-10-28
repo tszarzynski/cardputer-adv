@@ -6,6 +6,15 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-28
+
+- Breaking: units and codes have types of their own, so they can't be mixed up.
+  - `Percent` (0–100; `Percent::new` caps it at 100) for `Backlight::set_brightness` (was `set_percent`), `Codec::set_volume`, `Battery::percent` and `battery_percent`.
+  - `Millivolts` for `Battery::voltage` (was `millivolts`) and `battery_percent`; `Decibels` for `Codec::set_microphone_gain`.
+  - `Acceleration` and `Rotation`, with `x`, `y` and `z` fields, for `Imu::acceleration` and `Imu::rotation` (were `[i32; 3]`).
+  - `NecCode` and `ExtendedNecCode` for `IrTransmitter::send_nec` and `send_nec_extended` (were two arguments each), and `Pulse { mark_us, space_us }` for `send_raw` (was `(u16, u16)`).
+- `FrameDisplay::flush` and `set_asleep` deselect the panel even when cancelled mid-transfer, so the next transfer starts cleanly.
+
 ## [0.2.1] - 2026-10-27
 
 - `IrTransmitter::send_raw` sends any remote's code as `(mark, space)` pulses in µs, up to `IrTransmitter::MAX_PULSES` (128); `MAX_DURATION` is the longest mark or space.

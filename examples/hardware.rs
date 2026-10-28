@@ -29,7 +29,8 @@ use core::{
 };
 
 use cardputer_adv::{
-    AudioPins, Button, Display, Imu, IrTransmitter, RgbLed, embedded_sdmmc::BlockDevice,
+    Acceleration, AudioPins, Button, Decibels, Display, Imu, IrTransmitter, NecCode, Pulse, RgbLed,
+    Rotation, embedded_sdmmc::BlockDevice,
 };
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -117,7 +118,9 @@ async fn main(spawner: Spawner) -> ! {
         .spawn(listen(cardputer_adv::audio_pins!(p)).expect("audio task"));
     Timer::after(Duration::from_millis(20)).await;
     let mut codec = cardputer_adv::codec(bus).expect("codec");
-    codec.set_microphone_gain(24).expect("microphone gain");
+    codec
+        .set_microphone_gain(Decibels(24))
+        .expect("microphone gain");
     codec.set_microphone(true).expect("microphone");
     info!("{codec:?}");
     spawner.spawn(colours(led).expect("colours task"));
@@ -143,13 +146,20 @@ async fn remote(mut button: Button, mut ir: IrTransmitter) {
         button.wait_for_press().await;
         let press = PRESSES.fetch_add(1, Ordering::Relaxed) + 1;
         info!("G0: press {press}, sending NEC 0x00/0x45");
-        if let Err(error) = ir.send_nec(0x00, 0x45).await {
+        let code = NecCode {
+            address: 0x00,
+            command: 0x45,
+        };
+        if let Err(error) = ir.send_nec(code).await {
             warn!("IR: {error}");
         }
         // The same code's repeat, as raw pulses: what send_raw sends for
         // other protocols.
         Timer::after(Duration::from_millis(40)).await;
-        match ir.send_raw(&[(9000, 2250), (562, 0)]).await {
+        match ir
+            .send_raw(&[Pulse::new(9000, 2250), Pulse::new(562, 0)])
+            .await
+        {
             Ok(()) => info!("IR: sent a raw code"),
             Err(error) => warn!("IR raw: {error}"),
         }
@@ -212,12 +222,13 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
         );
 
         match (imu.acceleration(), imu.rotation()) {
-            (Ok(mg @ [x, y, z]), Ok(mdps)) => {
-                info!("motion: {mg:?} mg, {mdps:?} m°/s");
+            (Ok(acceleration @ Acceleration { x, y, z }), Ok(rotation)) => {
+                info!("motion: {acceleration:?} mg, {rotation:?} m°/s");
                 tilted |= x.abs() >= TILTED_MG || y.abs() >= TILTED_MG;
                 screen.show(4, tilted, format_args!("4. Tilt it on its side"));
                 screen.show(5, false, format_args!("   accel {x} {y} {z} mg"));
-                let [rx, ry, rz] = mdps.map(|m| m / 1000);
+                let Rotation { x, y, z } = rotation;
+                let [rx, ry, rz] = [x, y, z].map(|m| m / 1000);
                 screen.show(6, false, format_args!("   turning {rx} {ry} {rz} deg/s"));
             }
             (Err(error), _) | (_, Err(error)) => warn!("motion: {error}"),

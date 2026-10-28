@@ -1,6 +1,6 @@
 //! The keyboard: a TCA8418 on the I2C bus, and its interrupt line.
 
-use core::fmt;
+use core::{fmt, mem};
 
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
@@ -45,6 +45,7 @@ pub struct Keyboard {
 }
 
 /// Why [`Keyboard::wait_for_inputs`] went to read the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wake {
     Interrupt,
     Fallback,
@@ -63,7 +64,7 @@ impl Keyboard {
     /// If the TCA8418 can't be read over I2C.
     pub async fn wait_for_inputs(&mut self) -> Result<impl Iterator<Item = keys::KeyInput>, Error> {
         loop {
-            let wake = if core::mem::take(&mut self.pending) {
+            let wake = if mem::take(&mut self.pending) {
                 Wake::Pending
             } else {
                 match select(self.interrupt.wait_for_low(), Timer::after(FALLBACK_POLL)).await {
@@ -91,12 +92,12 @@ impl Keyboard {
             if !any_event {
                 // Woken with nothing to read: back off, so a line stuck low
                 // can't keep this task from yielding.
-                if matches!(wake, Wake::Interrupt) {
+                if wake == Wake::Interrupt {
                     Timer::after(SPURIOUS_BACKOFF).await;
                 }
                 continue;
             }
-            if matches!(wake, Wake::Fallback) {
+            if wake == Wake::Fallback {
                 // Events without an interrupt: the line isn't working.
                 self.missed = self.missed.saturating_add(1);
             }

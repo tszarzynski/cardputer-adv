@@ -13,22 +13,22 @@ What the Cardputer ADV has, and what this crate covers so far.
 | Part | Status | API |
 |---|---|---|
 | LCD, 1.14" ST7789V2, 240×135 | ✅ drawing directly, or a framebuffer sent by DMA; the controller's sleep | `display`, `frame_display`, `Frame`, `FrameDisplay::flush`, `FrameDisplay::set_asleep` |
-| Backlight (GPIO38) | ✅ dimmable, 0–100% | `Backlight::set_percent` |
+| Backlight (GPIO38) | ✅ dimmable, 0–100% | `Backlight::set_brightness` |
 | Keyboard, 56 keys (TCA8418) | ✅ Shift and Fn layers, interrupt-driven, wakes the chip from light sleep | `keyboard`, `keyboard_on`, `Keyboard::wait_for_inputs`, `Keyboard::listen_for_wake` |
 | Motion sensor (BMI270) | ✅ accelerometer, ±8 g at 100 Hz; gyroscope, ±2000 °/s at 100 Hz; ❌ motion interrupts | `imu`, `Imu::acceleration`, `Imu::set_gyroscope`, `Imu::calibrate_gyroscope`, `Imu::rotation` |
 | Speaker (ES8311 codec, NS4150B amplifier) | ✅ playing samples at 44.1 kHz, volume, output off for sleep | `speaker`, `Speaker::run`, `codec`, `Codec` |
 | Microphone (through the ES8311, I2S in on GPIO46) | ✅ recording at 44.1 kHz, alongside the speaker; preamp gain | `audio`, `Audio::run`, `Codec::set_microphone`, `Codec::set_microphone_gain` |
-| Battery (GPIO10) | ✅ voltage and estimated charge; charging can't be detected (no line for it) | `battery`, `Battery::millivolts`, `Battery::percent` |
+| Battery (GPIO10) | ✅ voltage and estimated charge; charging can't be detected (no line for it) | `battery`, `Battery::voltage`, `Battery::percent` |
 | Shared I2C bus (keyboard, codec, motion sensor) | ✅ | `i2c` |
 | microSD slot (SPI: CS 12, MOSI 14, CLK 40, MISO 39) | ⚠️ FAT files through [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc), with the `sd-card` feature; not yet tested on hardware | `sd_card`, `SdCard` |
-| IR transmitter (GPIO44) | ✅ NEC codes on a 38 kHz carrier; ❌ other protocols | `rmt`, `ir_transmitter`, `IrTransmitter::send_nec` |
+| IR transmitter (GPIO44) | ✅ NEC codes on a 38 kHz carrier, and any other protocol's as raw pulses | `rmt`, `ir_transmitter`, `IrTransmitter::send_nec`, `IrTransmitter::send_raw` |
 | RGB LED (WS2812 on GPIO21) | ✅ any colour; it's powered through GPIO38, so it's lit only while the backlight is | `rmt`, `rgb_led`, `RgbLed::set_color` |
 | G0 button, after boot | ✅ debounced presses, wakes the chip from light sleep | `button`, `Button::wait_for_press` |
 | Grove port (GPIO1, 2) and EXT header | not board-specific: use esp-hal directly | |
 
 ## API
 
-- `display(DisplayPins)` sets up the 1.14" ST7789V2 LCD and turns the backlight on. You get it back as a 240×135 RGB565 [embedded-graphics](https://docs.rs/embedded-graphics) `DrawTarget`, in landscape with the keyboard below, and a `Backlight`. It draws straight to the panel, so each shape shows as it's drawn. `Backlight::set_percent` dims it with 256 Hz PWM on LEDC (as M5GFX does; the LED driver doesn't follow fast PWM); the RGB LED, on the same pin, dims too.
+- `display(DisplayPins)` sets up the 1.14" ST7789V2 LCD and turns the backlight on. You get it back as a 240×135 RGB565 [embedded-graphics](https://docs.rs/embedded-graphics) `DrawTarget`, in landscape with the keyboard below, and a `Backlight`. It draws straight to the panel, so each shape shows as it's drawn. `Backlight::set_brightness` dims it with 256 Hz PWM on LEDC (as M5GFX does; the LED driver doesn't follow fast PWM); the RGB LED, on the same pin, dims too.
 - `frame_display(DisplayPins, dma)` sets up the same LCD to be fed from a `Frame`: a 240×135 RGB565 framebuffer (64.8 kB, kept in a static) that you draw into with embedded-graphics. `FrameDisplay::flush(&mut frame).await` then sends it by DMA, so other tasks run meanwhile.
   - Only pixels whose colour changed are sent: each run of changed rows goes as one rectangle, as wide as its changes. Redrawing the whole frame every time is fine.
   - A whole frame takes 13 ms at 40 MHz. Drawing straight to the panel through `display` sends a frame in about 28 ms, converting pixel by pixel.
@@ -47,11 +47,11 @@ What the Cardputer ADV has, and what this crate covers so far.
 - `audio(AudioPins)` starts the speaker's stream and the microphone's together, on the same I2S clocks, and returns an `Audio`. Once `codec` has set the codec up, `Codec::set_microphone(true)` turns its ADC on, and `Codec::set_microphone_gain(db)` sets its preamp (0–30 dB, in 3 dB steps). `Audio::run(fill, take).await` plays what `fill` writes and hands what's heard to `take`, up to 256 mono samples at a time; the two run together because the microphone runs on the speaker's clocks. A stream that falls more than 23 ms behind restarts, so its sound has a gap.
 - `Imu::set_gyroscope(true)` turns the BMI270's gyroscope on (±2000 °/s at 100 Hz; it draws about 0.9 mA, so `imu` leaves it off), and `Imu::rotation()` reads it in milli-degrees a second. Uncalibrated it can read several degrees a second at rest (from 0.5 to 9 °/s in different runs on the ADV tested); `Imu::calibrate_gyroscope().await`, with the Cardputer lying still for about 0.4 s, measures that offset and takes it off from then on.
 - `rmt(RMT)` sets up the RMT peripheral for the RGB LED and the IR transmitter; give each one of its transmit channels. `rgb_led(channel, GPIO21)` returns an `RgbLed`, and `RgbLed::set_color(Rgb888).await` sets it (black is off). It's powered through the backlight's switch, so it's lit only while the backlight is, and dims with it.
-- `ir_transmitter(channel, GPIO44)` returns an `IrTransmitter`, which sends on a 38 kHz carrier. NEC codes: `send_nec(address, command)`, `send_nec_extended` for a 16-bit address, and `send_nec_repeat` for a held button. Any other protocol's (Sony, RC5, Samsung, an air conditioner's), or timings recorded from a remote: `send_raw(&[(mark, space), …])`, each pair the carrier on for `mark` µs and then off for `space` µs, up to `IrTransmitter::MAX_PULSES` (128) pairs.
+- `ir_transmitter(channel, GPIO44)` returns an `IrTransmitter`, which sends on a 38 kHz carrier. NEC codes: `send_nec(NecCode { address, command })`, `send_nec_extended(ExtendedNecCode { … })` for a 16-bit address, and `send_nec_repeat` for a held button. Any other protocol's (Sony, RC5, Samsung, an air conditioner's), or timings recorded from a remote: `send_raw(&[Pulse { mark_us, space_us }, …])`, each the carrier on for `mark_us` µs and then off for `space_us` µs, up to `IrTransmitter::MAX_PULSES` (128) pulses.
 - `button(GPIO0)` returns the G0 `Button`: `is_pressed()`, `wait_for_press().await` (debounced), and `listen_for_wake()` to wake the chip from light sleep, as `Keyboard::listen_for_wake` does.
 - `sd_card(SdCardPins)`, with the `sd-card` feature, sets up the microSD card's own SPI bus (SPI3) and returns an `SdCard`, an [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc) `BlockDevice`. Read and write FAT files through `embedded_sdmmc::VolumeManager`; the crate re-exports `embedded_sdmmc`, so the versions match. The card is started on first use (at 400 kHz, then run at 20 MHz), and again after a failed access, so it can be inserted or swapped while the app runs. It's blocking, so a long read holds up its executor.
 - Each part's pins come out of esp-hal's `Peripherals` with a macro named after it: `display_pins!(p)`, `i2c_pins!(p)`, `keyboard_pins!(p)`, `speaker_pins!(p)`, `audio_pins!(p)`, `battery_pins!(p)` and `sd_card_pins!(p)`. Only those fields move, so the rest of `p` stays usable. The `…Pins` structs can still be written out by hand.
-- `battery(BatteryPins)` measures the battery voltage (`Battery::millivolts()`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does, and `Battery::percent()` the charge left, by M5Unified's estimate (3.30 V empty, 4.10 V full). The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
+- `battery(BatteryPins)` measures the battery voltage (`Battery::voltage()`, in `Millivolts`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does, and `Battery::percent()` the charge left (a `Percent`), by M5Unified's estimate (3.30 V empty, 4.10 V full). The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
 
 ```rust
 use cardputer_adv::{display_pins, keyboard_pins};
@@ -68,30 +68,30 @@ loop {
 With the motion sensor and the speaker, set the shared bus up first:
 
 ```rust
-use cardputer_adv::{i2c_pins, speaker_pins};
+use cardputer_adv::{Acceleration, Percent, i2c_pins, speaker_pins};
 
 let bus = cardputer_adv::i2c(i2c_pins!(p))?;
 let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11)?;
 let mut imu = cardputer_adv::imu(bus)?;
-let [x, y, z] = imu.acceleration()?; // milli-g
+let Acceleration { x, y, z } = imu.acceleration()?; // milli-g
 
 // In a task (ideally on a higher-priority executor):
 let mut speaker = cardputer_adv::speaker(speaker_pins!(p))?;
 // …and once it's running (the codec clocks itself from the stream):
 let mut codec = cardputer_adv::codec(bus)?;
-codec.set_volume(60)?;
+codec.set_volume(Percent::new(60))?;
 let Err(error) = speaker.run(|samples| samples.fill(0)).await; // runs until it fails
 ```
 
 The microphone, the RGB LED and the IR transmitter:
 
 ```rust
-use cardputer_adv::audio_pins;
+use cardputer_adv::{Decibels, NecCode, audio_pins};
 use embedded_graphics::pixelcolor::{Rgb888, RgbColor};
 
 let mut audio = cardputer_adv::audio(audio_pins!(p))?;
 let mut codec = cardputer_adv::codec(bus)?;
-codec.set_microphone_gain(24)?;
+codec.set_microphone_gain(Decibels(24))?;
 codec.set_microphone(true)?;
 // In a task: silence out, 44.1 kHz mono in.
 let Err(error) = audio.run(|out| out.fill(0), |heard| { /* … */ }).await;
@@ -100,7 +100,7 @@ let rmt = cardputer_adv::rmt(p.RMT)?;
 let mut led = cardputer_adv::rgb_led(rmt.channel0, p.GPIO21)?;
 let mut ir = cardputer_adv::ir_transmitter(rmt.channel1, p.GPIO44)?;
 led.set_color(Rgb888::GREEN).await?;
-ir.send_nec(0x00, 0x45).await?;
+ir.send_nec(NecCode { address: 0x00, command: 0x45 }).await?;
 ```
 
 With a framebuffer, sent by DMA:
@@ -138,7 +138,7 @@ use esp_hal::rtc_cntl::sleep::{LowPower, RtcSleepConfig};
 let mut low_power = LowPower::new(p.LPWR);
 
 // Going dark:
-backlight.set_percent(0)?;
+backlight.set_brightness(Percent::ZERO)?;
 display.set_asleep(true).await?; // the panel controller sleeps, keeping its picture
 codec.set_output(false)?;        // before the I2S clock stops, or the speaker clicks
 
@@ -151,7 +151,7 @@ low_power.sleep_light(RtcSleepConfig::default()); // returns at the key, or the 
 // Lighting up again:
 display.set_asleep(false).await?;
 codec.set_output(true)?;
-backlight.set_percent(100)?;
+backlight.set_brightness(Percent::FULL)?;
 ```
 
 While the chip sleeps its USB is off (no log, no flashing until it wakes), and the embassy clock stops. The speaker's stream runs dry and restarts on silence by itself.
