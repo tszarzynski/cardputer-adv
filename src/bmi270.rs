@@ -42,14 +42,61 @@ pub const ACCELEROMETER_ON: u8 = 1 << 2;
 /// `INTERNAL_STATUS`: the configuration was taken.
 pub const INITIALISED: u8 = 1 << 0;
 
-/// `ACC_CONF`: 100 Hz, averaging 4 samples, the performance filter.
-pub const ACC_CONF_100HZ: u8 = 0x08 | 0x02 << 4 | 1 << 7;
 /// `ACC_RANGE`: ±8 g.
 pub const ACC_RANGE_8G: u8 = 0x02;
-/// `GYR_CONF`: 100 Hz, the normal filter, performance for noise and filter.
-pub const GYR_CONF_100HZ: u8 = 0x08 | 0x02 << 4 | 1 << 6 | 1 << 7;
 /// `GYR_RANGE`: ±2000 °/s, and the same for its OIS output.
 pub const GYR_RANGE_2000: u8 = 1 << 3;
+
+/// `ACC_CONF` and `GYR_CONF`: 100 Hz, and their bandwidth field at 2: the
+/// normal filter, or in low-power mode, averaging 4 samples.
+const CONF_100HZ: u8 = 0x08 | 0x02 << 4;
+/// `ACC_CONF` and `GYR_CONF`: the filter for continuous sampling, not the
+/// low-power duty cycle.
+const FILTER_PERF: u8 = 1 << 7;
+/// `GYR_CONF`: the gyroscope's low-noise mode.
+const NOISE_PERF: u8 = 1 << 6;
+
+/// The motion sensor's power modes, as its datasheet has them (Table 6),
+/// trading current for noise. The currents are typical, for the sensor
+/// alone; with advanced power save on, which [`imu`] leaves it.
+///
+/// [`imu`]: crate::imu
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum ImuMode {
+    /// Each sensor wakes for 4 samples a reading and averages them: the
+    /// accelerometer alone draws down to a few µA, both down to 420 µA. The
+    /// readings are noisier, and filtered differently.
+    LowPower,
+    /// Continuous sampling: the accelerometer draws 210 µA, both 685 µA.
+    Normal,
+    /// As [`Normal`](Self::Normal), with the gyroscope's low-noise mode on:
+    /// both draw 970 µA. What [`imu`] starts in.
+    ///
+    /// [`imu`]: crate::imu
+    #[default]
+    Performance,
+}
+
+impl ImuMode {
+    /// `ACC_CONF` in this mode.
+    pub(crate) const fn acc_conf(self) -> u8 {
+        match self {
+            Self::LowPower => CONF_100HZ,
+            Self::Normal | Self::Performance => CONF_100HZ | FILTER_PERF,
+        }
+    }
+
+    /// `GYR_CONF` in this mode.
+    pub(crate) const fn gyr_conf(self) -> u8 {
+        match self {
+            Self::LowPower => CONF_100HZ,
+            Self::Normal => CONF_100HZ | FILTER_PERF,
+            Self::Performance => CONF_100HZ | FILTER_PERF | NOISE_PERF,
+        }
+    }
+}
 
 /// The most configuration bytes one write carries: a whole number of
 /// 16-bit words, with the register address making it 127 bytes.
@@ -109,8 +156,15 @@ mod tests {
 
     #[test]
     fn the_settings_are_the_datasheets() {
-        assert_eq!(ACC_CONF_100HZ, 0xA8);
-        assert_eq!(GYR_CONF_100HZ, 0xE8);
+        // Its examples: normal power mode, ACC_CONF 0xA8; performance mode,
+        // GYR_CONF 0xE8.
+        assert_eq!(ImuMode::Performance.acc_conf(), 0xA8);
+        assert_eq!(ImuMode::Performance.gyr_conf(), 0xE8);
+        assert_eq!(ImuMode::Normal.acc_conf(), 0xA8);
+        assert_eq!(ImuMode::Normal.gyr_conf(), 0xA8);
+        // Low power: no performance bits, 100 Hz, averaging 4.
+        assert_eq!(ImuMode::LowPower.acc_conf(), 0x28);
+        assert_eq!(ImuMode::LowPower.gyr_conf(), 0x28);
         assert_eq!(GYR_RANGE_2000, 0x08);
     }
 }

@@ -9,8 +9,8 @@ use embedded_hal_async::i2c::I2c as _;
 use crate::{
     Acceleration, Error, I2cBus, I2cDevice, Rotation,
     bmi270::{
-        self, ACC_CONF_100HZ, ACC_RANGE_8G, ACCELEROMETER_ON, ADVANCED_POWER_SAVE, GYR_CONF_100HZ,
-        GYR_RANGE_2000, GYROSCOPE_ON, INITIALISED, SOFT_RESET, UPLOAD_CHUNK, register,
+        self, ACC_RANGE_8G, ACCELEROMETER_ON, ADVANCED_POWER_SAVE, GYR_RANGE_2000, GYROSCOPE_ON,
+        INITIALISED, ImuMode, SOFT_RESET, UPLOAD_CHUNK, register,
     },
     convert::{milli_g, millidegrees_per_second},
 };
@@ -32,11 +32,13 @@ const CALIBRATION_SAMPLES: i32 = 32;
 const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 
 /// The BMI270: its accelerometer, ±8 g at 100 Hz, and its gyroscope,
-/// ±2000 °/s at 100 Hz once [turned on](Self::set_gyroscope).
+/// ±2000 °/s at 100 Hz once [turned on](Self::set_gyroscope), both in its
+/// [power mode](Self::set_mode).
 pub struct Imu {
     device: I2cDevice,
     /// Where it answered: 0x68 or 0x69.
     address: u8,
+    mode: ImuMode,
     /// The gyroscope's raw reading at rest, taken off each reading.
     gyroscope_offset: [i32; 3],
 }
@@ -52,8 +54,34 @@ impl Imu {
         Ok(Acceleration { x, y, z })
     }
 
-    /// Turns the gyroscope on or off. It draws about 0.9 mA, so [`imu`]
-    /// leaves it off; once on, its first readings come after about 45 ms.
+    /// Sets the power mode: how much current the sensors draw, against how
+    /// noisy their readings are. [`imu`] starts in
+    /// [`ImuMode::Performance`]; [`ImuMode::LowPower`] suits tilt and shakes
+    /// on battery.
+    ///
+    /// The gyroscope's offset can differ between modes: calibrate it
+    /// ([`calibrate_gyroscope`](Self::calibrate_gyroscope)) after changing.
+    ///
+    /// # Errors
+    ///
+    /// If the sensor doesn't answer; the mode is then partly set.
+    pub async fn set_mode(&mut self, mode: ImuMode) -> Result<(), Error> {
+        self.write(register::ACC_CONF, mode.acc_conf()).await?;
+        self.write(register::GYR_CONF, mode.gyr_conf()).await?;
+        self.mode = mode;
+        Ok(())
+    }
+
+    /// The power mode the sensors are in.
+    #[must_use]
+    pub const fn mode(&self) -> ImuMode {
+        self.mode
+    }
+
+    /// Turns the gyroscope on or off, in the [power mode](Self::set_mode).
+    /// [`imu`] leaves it off, as it draws far more than the accelerometer:
+    /// 685 µA with it, against 210 µA alone, in [`ImuMode::Normal`]. Once
+    /// on, its first readings come after about 45 ms.
     ///
     /// # Errors
     ///
@@ -61,7 +89,7 @@ impl Imu {
     pub async fn set_gyroscope(&mut self, on: bool) -> Result<(), Error> {
         if on {
             self.write(register::GYR_RANGE, GYR_RANGE_2000).await?;
-            self.write(register::GYR_CONF, GYR_CONF_100HZ).await?;
+            self.write(register::GYR_CONF, self.mode.gyr_conf()).await?;
         }
         self.set_power(on).await
     }
@@ -139,7 +167,7 @@ impl Imu {
             return Err(Error::Imu);
         }
         self.write(register::ACC_RANGE, ACC_RANGE_8G).await?;
-        self.write(register::ACC_CONF, ACC_CONF_100HZ).await?;
+        self.write(register::ACC_CONF, self.mode.acc_conf()).await?;
         self.set_power(false).await
     }
 
@@ -202,6 +230,7 @@ pub async fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
         let mut imu = Imu {
             device: I2cDevice::new(bus),
             address,
+            mode: ImuMode::default(),
             gyroscope_offset: [0; 3],
         };
         if imu
@@ -220,6 +249,7 @@ impl fmt::Debug for Imu {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Imu")
             .field("address", &self.address)
+            .field("mode", &self.mode)
             .field("gyroscope_offset", &self.gyroscope_offset)
             .finish_non_exhaustive()
     }

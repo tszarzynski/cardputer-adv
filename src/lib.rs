@@ -110,6 +110,7 @@ mod units;
 
 pub use audio::{Audio, AudioPins, audio};
 pub use battery::{Battery, BatteryPins, battery};
+pub use bmi270::ImuMode;
 pub use button::{Button, button};
 pub use codec::{Codec, codec};
 pub use convert::battery_percent;

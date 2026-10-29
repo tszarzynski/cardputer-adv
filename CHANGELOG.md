@@ -13,6 +13,7 @@ follows [Semantic Versioning](https://semver.org/).
   - The keyboard and the motion sensor have drivers of their own, for the async bus. `keys` is this crate's (`KeyInput`, `Arrow` and `Modifier`, as before) instead of a re-export of cardputer-adv-keyboard, which isn't a dependency any more; `Keyboard::driver_mut` is gone. bmi2 is now only where the BMI270's configuration comes from.
   - `KeyInput`, `Arrow` and `Modifier` are `#[non_exhaustive]`, so keys can be added without a breaking change: a `match` on them needs a `_` arm.
 - `Keyboard::wait_for_inputs` keeps the keys it has read when it's cancelled, and returns them next time.
+- `Imu::set_mode` sets the motion sensor's power mode (`ImuMode`: `LowPower`, `Normal` or `Performance`, the datasheet's), trading current for noise. `imu` still starts in `Performance`, as before; `LowPower` takes the accelerometer from 210 µA down to a few µA.
 - `Keyboard::is_held` says whether a key is held down (for games, and chords such as Ctrl + C), by what it types with or without Shift and Fn.
 - README: the framebuffer and sleep examples compile (`Frame::clear` can't fail, so no `?`; the sleep example imports `Duration` and `Instant`).
 - `examples/flush.rs` (`just flush`) times `FrameDisplay::flush` on a Cardputer for changed areas of different shapes, and logs it.

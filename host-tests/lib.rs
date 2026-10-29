@@ -32,6 +32,7 @@ mod tca8418;
 #[path = "../src/units.rs"]
 mod units;
 
+pub use bmi270::ImuMode;
 pub use frame::Frame;
 pub use keymap::Keymap;
 pub use panel::{HEIGHT, WIDTH};
