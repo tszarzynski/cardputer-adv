@@ -7,7 +7,7 @@ use embassy_time::{Duration, Timer};
 use embedded_hal_async::i2c::I2c as _;
 
 use crate::{
-    Acceleration, Error, I2cBus, I2cDevice, Millicelsius, Rotation,
+    Acceleration, Error, I2cBus, I2cDevice, Millicelsius, Motion, Rotation,
     bmi270::{
         self, ACC_RANGE_8G, ACCELEROMETER_ON, ADVANCED_POWER_SAVE, GYR_RANGE_2000, GYROSCOPE_ON,
         INITIALISED, ImuMode, SOFT_RESET, UPLOAD_CHUNK, register,
@@ -50,8 +50,30 @@ impl Imu {
     ///
     /// If the sensor can't be read.
     pub async fn acceleration(&mut self) -> Result<Acceleration, Error> {
-        let [x, y, z] = self.axes(register::ACC_DATA).await?.map(milli_g);
-        Ok(Acceleration { x, y, z })
+        let raw = self.axes(register::ACC_DATA).await?;
+        Ok(acceleration(raw))
+    }
+
+    /// The acceleration and the rotation rate now, in one read, so both are
+    /// of the same moment: for combining them (tilt, gestures), and half
+    /// the bus traffic of reading them apart. The rotation is as
+    /// [`rotation`](Self::rotation)'s, and zero while the gyroscope is off.
+    ///
+    /// # Errors
+    ///
+    /// If the sensor can't be read.
+    pub async fn motion(&mut self) -> Result<Motion, Error> {
+        // The gyroscope's registers follow the accelerometer's.
+        let mut data = [0; 12];
+        self.device
+            .write_read(self.address, &[register::ACC_DATA], &mut data)
+            .await
+            .map_err(|_| Error::Imu)?;
+        let [a0, a1, a2, a3, a4, a5, g0, g1, g2, g3, g4, g5] = data;
+        Ok(Motion {
+            acceleration: acceleration(bmi270::axes([a0, a1, a2, a3, a4, a5])),
+            rotation: self.rotation_from(bmi270::axes([g0, g1, g2, g3, g4, g5])),
+        })
     }
 
     /// Sets the power mode: how much current the sensors draw, against how
@@ -106,9 +128,7 @@ impl Imu {
     /// If the sensor can't be read.
     pub async fn rotation(&mut self) -> Result<Rotation, Error> {
         let raw = self.axes(register::GYR_DATA).await?;
-        let [x, y, z] =
-            array::from_fn(|axis| millidegrees_per_second(raw[axis] - self.gyroscope_offset[axis]));
-        Ok(Rotation { x, y, z })
+        Ok(self.rotation_from(raw))
     }
 
     /// The sensor's temperature: the board's, near enough, a little above
@@ -197,6 +217,14 @@ impl Imu {
         self.write(register::PWR_CONF, config).await
     }
 
+    /// A gyroscope reading in the sensor's counts as a rotation rate, its
+    /// offset taken off.
+    fn rotation_from(&self, raw: [i32; 3]) -> Rotation {
+        let [x, y, z] =
+            array::from_fn(|axis| millidegrees_per_second(raw[axis] - self.gyroscope_offset[axis]));
+        Rotation { x, y, z }
+    }
+
     /// A reading's three axes, in the sensor's counts, from `register` on.
     async fn axes(&mut self, register: u8) -> Result<[i32; 3], Error> {
         let mut data = [0; 6];
@@ -231,6 +259,12 @@ impl Imu {
             .await
             .map_err(|_| Error::Imu)
     }
+}
+
+/// An accelerometer reading in the sensor's counts, in milli-g.
+fn acceleration(raw: [i32; 3]) -> Acceleration {
+    let [x, y, z] = raw.map(milli_g);
+    Acceleration { x, y, z }
 }
 
 /// Starts the BMI270 on the shared bus: finds it at either of its addresses,

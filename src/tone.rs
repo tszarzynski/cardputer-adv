@@ -53,10 +53,11 @@ pub struct Tone {
 
 impl Tone {
     /// A square wave at `frequency` for `duration`, at half the full level.
+    /// The duration is `core`'s or embassy-time's, which converts into it.
     /// Frequencies above half the sample rate (22 kHz) alias.
     #[must_use]
-    pub fn new(frequency: Hertz, duration: Duration) -> Self {
-        let samples = duration.as_micros() * u128::from(SAMPLE_RATE) / 1_000_000;
+    pub fn new(frequency: Hertz, duration: impl Into<Duration>) -> Self {
+        let samples = duration.into().as_micros() * u128::from(SAMPLE_RATE) / 1_000_000;
         let total = u32::try_from(samples).unwrap_or(u32::MAX);
         // Rounded to the nearest, so the cycles land on time.
         let rate = u64::from(SAMPLE_RATE);

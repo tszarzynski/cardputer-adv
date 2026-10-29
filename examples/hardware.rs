@@ -33,12 +33,11 @@ use core::{
     fmt::{self, Write as _},
     str,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
-    time,
 };
 
 use cardputer_adv::{
     Acceleration, AudioPins, Button, Click, Decibels, Display, Hertz, Imu, ImuMode, IrTransmitter,
-    Keyboard, NecCode, Percent, Pulse, RgbLed, Rotation, Tone,
+    Keyboard, Motion, NecCode, Percent, Pulse, RgbLed, Rotation, Tone,
     embedded_sdmmc::BlockDevice,
     keys::{KeyEvent, KeyInput, Modifier},
 };
@@ -175,7 +174,7 @@ async fn remote(mut button: Button, mut ir: IrTransmitter) {
             _ => 880,
         };
         BEEP.signal(
-            Tone::new(Hertz(pitch), time::Duration::from_millis(80)).with_level(Percent::new(25)),
+            Tone::new(Hertz(pitch), Duration::from_millis(80)).with_level(Percent::new(25)),
         );
         let press = PRESSES.fetch_add(1, Ordering::Relaxed) + 1;
         info!("G0: {click:?} (press {press}), sending NEC 0x00/0x45");
@@ -243,7 +242,7 @@ async fn listen(pins: AudioPins) {
     // Samples to leave unmeasured: the microphone hears the beeps, which
     // mustn't count as a clap. Until a little after each ends.
     let hush = Cell::new(0);
-    let mut beep = Tone::new(Hertz(0), time::Duration::ZERO);
+    let mut beep = Tone::new(Hertz(0), Duration::from_ticks(0));
     let fill = |samples: &mut [i16]| {
         if let Some(tone) = BEEP.try_take() {
             beep = tone;
@@ -315,8 +314,11 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
             format_args!("3. Clap near it: loudest {loudest}"),
         );
 
-        match (imu.acceleration().await, imu.rotation().await) {
-            (Ok(acceleration @ Acceleration { x, y, z }), Ok(rotation)) => {
+        match imu.motion().await {
+            Ok(Motion {
+                acceleration: acceleration @ Acceleration { x, y, z },
+                rotation,
+            }) => {
                 info!("motion: {acceleration:?} mg, {rotation:?} m°/s");
                 tilted |= x.abs() >= TILTED_MG || y.abs() >= TILTED_MG;
                 let mode = imu.mode();
@@ -326,7 +328,7 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
                 let [rx, ry, rz] = [x, y, z].map(|m| m / 1000);
                 screen.show(6, false, format_args!("   turning {rx} {ry} {rz} deg/s"));
             }
-            (Err(error), _) | (_, Err(error)) => warn!("motion: {error}"),
+            Err(error) => warn!("motion: {error}"),
         }
         match imu.temperature().await {
             Ok(temperature) => {

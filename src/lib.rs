@@ -138,4 +138,6 @@ pub use remote::{RMT_FREQUENCY, rmt};
 pub use sd_card::{SdCard, SdCardPins, sd_card};
 pub use speaker::{Speaker, SpeakerPins, speaker};
 pub use tone::{SAMPLE_RATE, Tone, Waveform};
-pub use units::{Acceleration, Decibels, Hertz, Millicelsius, Millivolts, Percent, Rotation};
+pub use units::{
+    Acceleration, Decibels, Hertz, Millicelsius, Millivolts, Motion, Percent, Rotation,
+};

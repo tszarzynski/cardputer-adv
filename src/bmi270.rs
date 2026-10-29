@@ -14,7 +14,8 @@ pub mod register {
     pub const CHIP_ID: u8 = 0x00;
     /// The accelerometer's x, y and z, each 16-bit little-endian.
     pub const ACC_DATA: u8 = 0x0C;
-    /// The gyroscope's x, y and z, each 16-bit little-endian.
+    /// The gyroscope's x, y and z, each 16-bit little-endian, right after
+    /// the accelerometer's.
     pub const GYR_DATA: u8 = 0x12;
     pub const INTERNAL_STATUS: u8 = 0x21;
     /// The temperature, 16-bit little-endian.

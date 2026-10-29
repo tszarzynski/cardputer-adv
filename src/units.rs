@@ -112,6 +112,16 @@ pub struct Rotation {
     pub z: i32,
 }
 
+/// The motion sensor's two readings, taken at the same moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Motion {
+    /// The acceleration, in milli-g.
+    pub acceleration: Acceleration,
+    /// The rotation rate, in milli-degrees a second.
+    pub rotation: Rotation,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

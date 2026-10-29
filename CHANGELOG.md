@@ -6,11 +6,14 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-29
+
 - `Keyboard::wait_for_events` returns keys coming up as well as going down (`keys::KeyEvent`), for games; a release says what its press typed. `wait_for_inputs` is built on it, and returns the presses as before.
 - `KeyInput::char()`, the character a key puts in text, and `Display` for `KeyInput`, `Arrow` and `Modifier`: the key's name.
 - `Button::wait_for_release`, and `Button::wait_for_click`, which tells a single click, a double click and a long press apart (`Click`).
-- `Tone`, a beep for `Speaker::run` and `Audio::run`: a square or triangle wave (`Waveform`) at a frequency (`Hertz`), for a time, faded in and out.
+- `Tone`, a beep for `Speaker::run` and `Audio::run`: a square or triangle wave (`Waveform`) at a frequency (`Hertz`), for a time, faded in and out. Its duration can be embassy-time's `Duration` as well as `core`'s.
 - `Imu::temperature`, in `Millicelsius`.
+- `Imu::motion`: the acceleration and the rotation rate in one read (`Motion`), of the same moment, and half the bus traffic of reading them apart.
 - The hardware example beeps each G0 click by its kind, logs keys' releases, and shows the temperature.
 - The README says why the motion sensor has no interrupts: on the ADV, its INT1 and INT2 pins don't reach the ESP32. Tested on the device: neither one's level showed on any free GPIO, nor on the keyboard controller's spare inputs.
 - `imu`'s docs give the time it takes as measured on the device, about 230 ms (they said its upload took about 50 ms).
