@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Breaking: the codec's controls are async, ahead of an async I2C bus: `codec`, and `Codec::set_volume`, `set_output`, `set_microphone` and `set_microphone_gain`.
+
 ## [0.3.0] - 2026-10-28
 
 - Breaking: units and codes have types of their own, so they can't be mixed up.

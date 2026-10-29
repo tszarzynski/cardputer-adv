@@ -44,7 +44,7 @@
 //! let mut imu = cardputer_adv::imu(bus)?;
 //! // In a task of its own: the speaker, then the codec it clocks.
 //! let mut speaker = cardputer_adv::speaker(speaker_pins!(p))?;
-//! let mut codec = cardputer_adv::codec(bus)?;
+//! let mut codec = cardputer_adv::codec(bus).await?;
 //!
 //! for key in keyboard.wait_for_inputs().await? { /* … */ }
 //! ```

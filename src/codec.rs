@@ -51,8 +51,9 @@ impl Codec {
     /// # Errors
     ///
     /// If the codec doesn't answer.
-    pub fn set_volume(&mut self, volume: Percent) -> Result<(), Error> {
+    pub async fn set_volume(&mut self, volume: Percent) -> Result<(), Error> {
         self.write(&[[ES8311_DAC_VOLUME, volume_register(volume)]])
+            .await
     }
 
     /// Turns the output to the amplifier off (`on = false`), or back on as
@@ -67,12 +68,14 @@ impl Codec {
     /// # Errors
     ///
     /// If the codec doesn't answer.
-    pub fn set_output(&mut self, on: bool) -> Result<(), Error> {
+    pub async fn set_output(&mut self, on: bool) -> Result<(), Error> {
         // On: the DAC first, then the path; off the other way round.
         if on {
             self.write(&[[ES8311_DAC_POWER, 0x00], [ES8311_OUTPUT, 0x10]])
+                .await
         } else {
             self.write(&[[ES8311_OUTPUT, 0x00], [ES8311_DAC_POWER, 0x02]])
+                .await
         }
     }
 
@@ -87,7 +90,7 @@ impl Codec {
     /// If the codec doesn't answer.
     ///
     /// [`Audio`]: crate::Audio
-    pub fn set_microphone(&mut self, on: bool) -> Result<(), Error> {
+    pub async fn set_microphone(&mut self, on: bool) -> Result<(), Error> {
         if on {
             self.write(&[
                 [ES8311_CLOCKS, CLOCKS_DAC_ADC],
@@ -97,9 +100,11 @@ impl Codec {
                 [0x17, 0xBF], // ADC volume: 0 dB
                 [0x1C, 0x6A], // ADC equalizer bypassed, DC offset removed
             ])
+            .await
         } else {
             // The PGA and the ADC off, then their clocks.
             self.write(&[[0x0E, 0x6A], [ES8311_CLOCKS, CLOCKS_DAC]])
+                .await
         }
     }
 
@@ -109,13 +114,19 @@ impl Codec {
     /// # Errors
     ///
     /// If the codec doesn't answer.
-    pub fn set_microphone_gain(&mut self, gain: Decibels) -> Result<(), Error> {
+    pub async fn set_microphone_gain(&mut self, gain: Decibels) -> Result<(), Error> {
         self.microphone_gain = microphone_gain_step(gain);
         self.write(&[[ES8311_ADC_PGA, MIC1 | self.microphone_gain]])
+            .await
     }
 
     /// Writes each `[register, value]` in turn.
-    fn write(&mut self, writes: &[[u8; 2]]) -> Result<(), Error> {
+    #[expect(
+        clippy::unused_async,
+        reason = "async for the async I2C bus, which comes with the keyboard's and the motion \
+                  sensor's async drivers"
+    )]
+    async fn write(&mut self, writes: &[[u8; 2]]) -> Result<(), Error> {
         writes
             .iter()
             .try_for_each(|write| self.device.write(ES8311, write).map_err(|_| Error::Codec))
@@ -135,21 +146,23 @@ impl Codec {
 /// If the codec doesn't answer.
 ///
 /// [`speaker`]: crate::speaker
-pub fn codec(bus: &'static I2cBus) -> Result<Codec, Error> {
+pub async fn codec(bus: &'static I2cBus) -> Result<Codec, Error> {
     let mut codec = Codec {
         device: CriticalSectionDevice::new(bus),
         microphone_gain: 0,
     };
-    codec.write(&[
-        [0x00, 0x80],                // reset: power on, state machine enabled
-        [ES8311_CLOCKS, CLOCKS_DAC], // clock manager: MCLK from BCLK, DAC clocks on
-        [0x02, 0x18],                // clock manager: MCLK = BCLK × 8 (256 fs at 32 bits a frame)
-        [0x0D, 0x01],                // system: analog circuits on
-        [ES8311_DAC_POWER, 0x00],    // system: DAC on
-        [ES8311_OUTPUT, 0x10],       // system: output to the amplifier on
-        [ES8311_DAC_VOLUME, 0xBF],   // DAC volume: 0 dB
-        [0x37, 0x08],                // DAC equalizer bypassed
-    ])?;
+    codec
+        .write(&[
+            [0x00, 0x80],                // reset: power on, state machine enabled
+            [ES8311_CLOCKS, CLOCKS_DAC], // clock manager: MCLK from BCLK, DAC clocks on
+            [0x02, 0x18], // clock manager: MCLK = BCLK × 8 (256 fs at 32 bits a frame)
+            [0x0D, 0x01], // system: analog circuits on
+            [ES8311_DAC_POWER, 0x00], // system: DAC on
+            [ES8311_OUTPUT, 0x10], // system: output to the amplifier on
+            [ES8311_DAC_VOLUME, 0xBF], // DAC volume: 0 dB
+            [0x37, 0x08], // DAC equalizer bypassed
+        ])
+        .await?;
     Ok(codec)
 }
 

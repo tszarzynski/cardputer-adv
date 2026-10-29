@@ -117,11 +117,12 @@ async fn main(spawner: Spawner) -> ! {
         .start(Priority::Priority2)
         .spawn(listen(cardputer_adv::audio_pins!(p)).expect("audio task"));
     Timer::after(Duration::from_millis(20)).await;
-    let mut codec = cardputer_adv::codec(bus).expect("codec");
+    let mut codec = cardputer_adv::codec(bus).await.expect("codec");
     codec
         .set_microphone_gain(Decibels(24))
+        .await
         .expect("microphone gain");
-    codec.set_microphone(true).expect("microphone");
+    codec.set_microphone(true).await.expect("microphone");
     info!("{codec:?}");
     spawner.spawn(colours(led).expect("colours task"));
     spawner.spawn(remote(button, ir).expect("remote task"));

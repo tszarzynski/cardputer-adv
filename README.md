@@ -39,7 +39,7 @@ What the Cardputer ADV has, and what this crate covers so far.
   - A 1 s fallback poll covers a missed interrupt; `missed_interrupts()` counts how often that poll was needed.
   - `Keyboard::listen_for_wake()`, just before esp-hal's `LowPower::sleep_light`, makes a key press end the light sleep; `wait_for_inputs` then reads the key.
 - `imu(&I2cBus)` finds the BMI270 motion sensor (at 0x68 or 0x69), uploads its configuration through [bmi2](https://crates.io/crates/bmi2) and turns on its accelerometer at ±8 g and 100 Hz. `Imu::acceleration()` reads it in milli-g.
-- `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `codec(&I2cBus)` then turns on the codec's DAC path to the NS4150B amplifier and returns a `Codec`, whose `set_volume(percent)` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
+- `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `codec(&I2cBus).await` then turns on the codec's DAC path to the NS4150B amplifier and returns a `Codec`, whose `set_volume(percent).await` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
   - The buffer holds 23 ms. If `fill` falls further behind, the stream restarts on silence, so the sound skips rather than stops.
   - `Codec::set_output(false)` powers the codec's DAC and its path to the amplifier down, and `set_output(true)` brings them back. Turn it off before the I2S clock stops (in a light sleep): the codec clocks itself from the stream, and the clock stopping and starting clicks in the speaker.
   - To avoid skips while anything else holds the CPU for longer (drawing a frame straight to the panel takes about 30 ms), run the speaker on a higher-priority executor, such as esp-rtos's `InterruptExecutor`.
@@ -78,8 +78,8 @@ let Acceleration { x, y, z } = imu.acceleration()?; // milli-g
 // In a task (ideally on a higher-priority executor):
 let mut speaker = cardputer_adv::speaker(speaker_pins!(p))?;
 // …and once it's running (the codec clocks itself from the stream):
-let mut codec = cardputer_adv::codec(bus)?;
-codec.set_volume(Percent::new(60))?;
+let mut codec = cardputer_adv::codec(bus).await?;
+codec.set_volume(Percent::new(60)).await?;
 let Err(error) = speaker.run(|samples| samples.fill(0)).await; // runs until it fails
 ```
 
@@ -90,9 +90,9 @@ use cardputer_adv::{Decibels, NecCode, audio_pins};
 use embedded_graphics::pixelcolor::{Rgb888, RgbColor};
 
 let mut audio = cardputer_adv::audio(audio_pins!(p))?;
-let mut codec = cardputer_adv::codec(bus)?;
-codec.set_microphone_gain(Decibels(24))?;
-codec.set_microphone(true)?;
+let mut codec = cardputer_adv::codec(bus).await?;
+codec.set_microphone_gain(Decibels(24)).await?;
+codec.set_microphone(true).await?;
 // In a task: silence out, 44.1 kHz mono in.
 let Err(error) = audio.run(|out| out.fill(0), |heard| { /* … */ }).await;
 
@@ -140,7 +140,7 @@ let mut low_power = LowPower::new(p.LPWR);
 // Going dark:
 backlight.set_brightness(Percent::ZERO)?;
 display.set_asleep(true).await?; // the panel controller sleeps, keeping its picture
-codec.set_output(false)?;        // before the I2S clock stops, or the speaker clicks
+codec.set_output(false).await?;  // before the I2S clock stops, or the speaker clicks
 
 // Each time round while dark:
 keyboard.listen_for_wake();      // a key press ends the sleep
@@ -150,7 +150,7 @@ low_power.sleep_light(RtcSleepConfig::default()); // returns at the key, or the 
 
 // Lighting up again:
 display.set_asleep(false).await?;
-codec.set_output(true)?;
+codec.set_output(true).await?;
 backlight.set_brightness(Percent::FULL)?;
 ```
 
