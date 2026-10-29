@@ -15,7 +15,7 @@ What the Cardputer ADV has, and what this crate covers so far.
 | LCD, 1.14" ST7789V2, 240×135 | ✅ drawing directly, or a framebuffer sent by DMA; the controller's sleep | `display`, `frame_display`, `Frame`, `FrameDisplay::flush`, `FrameDisplay::set_asleep` |
 | Backlight (GPIO38) | ✅ dimmable, 0–100% | `Backlight::set_brightness` |
 | Keyboard, 56 keys (TCA8418) | ✅ Shift and Fn layers, interrupt-driven, wakes the chip from light sleep | `keyboard`, `keyboard_on`, `Keyboard::wait_for_inputs`, `Keyboard::is_held`, `Keyboard::listen_for_wake` |
-| Motion sensor (BMI270) | ✅ accelerometer, ±8 g at 100 Hz; gyroscope, ±2000 °/s at 100 Hz; low-power, normal and performance modes; ❌ motion interrupts | `imu`, `Imu::acceleration`, `Imu::set_gyroscope`, `Imu::calibrate_gyroscope`, `Imu::rotation`, `Imu::set_mode` |
+| Motion sensor (BMI270) | ✅ accelerometer, ±8 g at 100 Hz; gyroscope, ±2000 °/s at 100 Hz; low-power, normal and performance modes; ❌ motion interrupts (its INT pins don't reach the ESP32) | `imu`, `Imu::acceleration`, `Imu::set_gyroscope`, `Imu::calibrate_gyroscope`, `Imu::rotation`, `Imu::set_mode` |
 | Speaker (ES8311 codec, NS4150B amplifier) | ✅ playing samples at 44.1 kHz, volume, output off for sleep | `speaker`, `Speaker::run`, `codec`, `Codec` |
 | Microphone (through the ES8311, I2S in on GPIO46) | ✅ recording at 44.1 kHz, alongside the speaker; preamp gain | `audio`, `Audio::run`, `Codec::set_microphone`, `Codec::set_microphone_gain` |
 | Battery (GPIO10) | ✅ voltage and estimated charge; charging can't be detected (no line for it) | `battery`, `Battery::voltage`, `Battery::percent` |

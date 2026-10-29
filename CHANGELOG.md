@@ -6,6 +6,7 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- The README says why the motion sensor has no interrupts: on the ADV, its INT1 and INT2 pins don't reach the ESP32. Tested on the device: neither one's level showed on any free GPIO, nor on the keyboard controller's spare inputs.
 - `imu`'s docs give the time it takes as measured on the device, about 230 ms (they said its upload took about 50 ms).
 
 ## [0.4.0] - 2026-10-29
