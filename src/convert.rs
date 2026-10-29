@@ -24,15 +24,21 @@ pub const fn microphone_gain_step(gain: Decibels) -> u8 {
     if gain.0 > 30 { 10 } else { gain.0 / 3 }
 }
 
-/// A BMI270 acceleration reading at ±8 g (4096 counts a g), in milli-g.
-pub const fn milli_g(raw: i32) -> i32 {
-    raw * 1000 / 4096
+/// A BMI270 acceleration reading at ±`full_scale` g (the 16 bits across
+/// it: 4096 counts a g at ±8 g), in milli-g.
+#[expect(clippy::cast_possible_truncation, reason = "at most 16 g, in milli-g")]
+pub const fn milli_g(raw: i32, full_scale: i32) -> i32 {
+    (raw as i64 * full_scale as i64 * 1000 / 32768) as i32
 }
 
-/// A BMI270 rotation reading at ±2000 °/s (16.384 counts per °/s), in
-/// milli-degrees a second.
-pub const fn millidegrees_per_second(raw: i32) -> i32 {
-    raw * 15_625 / 256
+/// A BMI270 rotation reading at ±`full_scale` °/s (the 16 bits across it:
+/// 16.384 counts per °/s at ±2000), in milli-degrees a second.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "at most 2000 °/s, in milli-degrees"
+)]
+pub const fn millidegrees_per_second(raw: i32, full_scale: i32) -> i32 {
+    (raw as i64 * full_scale as i64 * 1000 / 32768) as i32
 }
 
 /// A BMI270 temperature reading (0 at 23 °C, 512 counts a degree), or
@@ -90,11 +96,21 @@ mod tests {
 
     #[test]
     fn motion_readings_scale_to_their_ranges() {
-        assert_eq!(milli_g(4096), 1000);
-        assert_eq!(milli_g(-4096), -1000);
-        assert_eq!(milli_g(i32::from(i16::MIN)), -8000);
-        assert_eq!(millidegrees_per_second(16_384), 1_000_000);
-        assert_eq!(millidegrees_per_second(i32::from(i16::MAX)), 1_999_938);
-        assert_eq!(millidegrees_per_second(i32::from(i16::MIN)), -2_000_000);
+        assert_eq!(milli_g(4096, 8), 1000);
+        assert_eq!(milli_g(-4096, 8), -1000);
+        assert_eq!(milli_g(i32::from(i16::MIN), 8), -8000);
+        assert_eq!(milli_g(16_384, 2), 1000);
+        assert_eq!(milli_g(i32::from(i16::MIN), 16), -16_000);
+        assert_eq!(millidegrees_per_second(16_384, 2000), 1_000_000);
+        assert_eq!(
+            millidegrees_per_second(i32::from(i16::MAX), 2000),
+            1_999_938
+        );
+        assert_eq!(
+            millidegrees_per_second(i32::from(i16::MIN), 2000),
+            -2_000_000
+        );
+        assert_eq!(millidegrees_per_second(262, 125), 999);
+        assert_eq!(millidegrees_per_second(i32::from(i16::MIN), 125), -125_000);
     }
 }

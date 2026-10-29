@@ -45,10 +45,97 @@ pub const ACCELEROMETER_ON: u8 = 1 << 2;
 /// `INTERNAL_STATUS`: the configuration was taken.
 pub const INITIALISED: u8 = 1 << 0;
 
-/// `ACC_RANGE`: ±8 g.
-pub const ACC_RANGE_8G: u8 = 0x02;
-/// `GYR_RANGE`: ±2000 °/s, and the same for its OIS output.
-pub const GYR_RANGE_2000: u8 = 1 << 3;
+/// `GYR_RANGE`: its OIS output at ±2000 °/s, whatever the main range.
+const OIS_RANGE_2000: u8 = 1 << 3;
+
+/// The accelerometer's range: the most it reads, against how finely. Each
+/// reading is 16 bits across the range, so ±2 g reads to 0.06 mg and
+/// ±16 g to 0.5 mg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum AccelerometerRange {
+    /// ±2 g: for tilt, where gravity is all there is.
+    G2,
+    /// ±4 g.
+    G4,
+    /// ±8 g: tilt and shakes. What [`imu`] starts at.
+    ///
+    /// [`imu`]: crate::imu
+    #[default]
+    G8,
+    /// ±16 g: for hard knocks.
+    G16,
+}
+
+impl AccelerometerRange {
+    /// `ACC_RANGE` at this range.
+    pub(crate) const fn register(self) -> u8 {
+        match self {
+            Self::G2 => 0,
+            Self::G4 => 1,
+            Self::G8 => 2,
+            Self::G16 => 3,
+        }
+    }
+
+    /// The range's end, in g.
+    pub(crate) const fn full_scale(self) -> i32 {
+        match self {
+            Self::G2 => 2,
+            Self::G4 => 4,
+            Self::G8 => 8,
+            Self::G16 => 16,
+        }
+    }
+}
+
+/// The gyroscope's range: the fastest turn it reads, against how finely.
+/// Each reading is 16 bits across the range, so ±125 °/s reads to
+/// 0.004 °/s and ±2000 °/s to 0.06 °/s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum GyroscopeRange {
+    /// ±125 °/s: slow, careful turns.
+    Dps125,
+    /// ±250 °/s.
+    Dps250,
+    /// ±500 °/s.
+    Dps500,
+    /// ±1000 °/s.
+    Dps1000,
+    /// ±2000 °/s: a flick of the wrist. What [`imu`] starts at.
+    ///
+    /// [`imu`]: crate::imu
+    #[default]
+    Dps2000,
+}
+
+impl GyroscopeRange {
+    /// `GYR_RANGE` at this range.
+    pub(crate) const fn register(self) -> u8 {
+        OIS_RANGE_2000
+            | match self {
+                Self::Dps2000 => 0,
+                Self::Dps1000 => 1,
+                Self::Dps500 => 2,
+                Self::Dps250 => 3,
+                Self::Dps125 => 4,
+            }
+    }
+
+    /// The range's end, in degrees a second.
+    pub(crate) const fn full_scale(self) -> i32 {
+        match self {
+            Self::Dps125 => 125,
+            Self::Dps250 => 250,
+            Self::Dps500 => 500,
+            Self::Dps1000 => 1000,
+            Self::Dps2000 => 2000,
+        }
+    }
+}
 
 /// `ACC_CONF` and `GYR_CONF`: 100 Hz, and their bandwidth field at 2: the
 /// normal filter, or in low-power mode, averaging 4 samples.
@@ -168,6 +255,14 @@ mod tests {
         // Low power: no performance bits, 100 Hz, averaging 4.
         assert_eq!(ImuMode::LowPower.acc_conf(), 0x28);
         assert_eq!(ImuMode::LowPower.gyr_conf(), 0x28);
-        assert_eq!(GYR_RANGE_2000, 0x08);
+    }
+
+    #[test]
+    fn the_ranges_registers_are_the_datasheets() {
+        // ACC_RANGE 0x02 is ±8 g, GYR_RANGE 0x08 ±2000 °/s (OIS too).
+        assert_eq!(AccelerometerRange::default().register(), 0x02);
+        assert_eq!(AccelerometerRange::G16.register(), 0x03);
+        assert_eq!(GyroscopeRange::default().register(), 0x08);
+        assert_eq!(GyroscopeRange::Dps125.register(), 0x0C);
     }
 }

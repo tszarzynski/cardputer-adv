@@ -102,6 +102,7 @@ mod panel;
 mod pins;
 mod pulses;
 mod remote;
+mod repeat;
 #[cfg(feature = "sd-card")]
 mod sd_card;
 mod speaker;
@@ -111,7 +112,7 @@ mod units;
 
 pub use audio::{Audio, AudioPins, audio};
 pub use battery::{Battery, BatteryPins, battery};
-pub use bmi270::ImuMode;
+pub use bmi270::{AccelerometerRange, GyroscopeRange, ImuMode};
 pub use button::{Button, Click, button};
 pub use codec::{Codec, codec};
 pub use convert::battery_percent;
@@ -134,6 +135,7 @@ pub use mipidsi;
 pub use panel::{HEIGHT, WIDTH};
 pub use pulses::{ExtendedNecCode, NecCode, Pulse};
 pub use remote::{RMT_FREQUENCY, rmt};
+pub use repeat::Repeat;
 #[cfg(feature = "sd-card")]
 pub use sd_card::{SdCard, SdCardPins, sd_card};
 pub use speaker::{Speaker, SpeakerPins, speaker};

@@ -27,6 +27,8 @@ pub mod keys;
 mod panel;
 #[path = "../src/pulses.rs"]
 mod pulses;
+#[path = "../src/repeat.rs"]
+mod repeat;
 #[path = "../src/tca8418.rs"]
 mod tca8418;
 #[path = "../src/tone.rs"]
@@ -34,7 +36,7 @@ mod tone;
 #[path = "../src/units.rs"]
 mod units;
 
-pub use bmi270::ImuMode;
+pub use bmi270::{AccelerometerRange, GyroscopeRange, ImuMode};
 pub use frame::Frame;
 pub use keymap::Keymap;
 pub use panel::{HEIGHT, WIDTH};

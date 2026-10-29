@@ -5,7 +5,7 @@
 //!
 //! [`Keyboard`]: crate::Keyboard
 
-use core::mem;
+use core::{array, iter, mem};
 
 use embedded_hal_async::i2c::I2c;
 
@@ -37,6 +37,14 @@ const MATRIX: [u8; 3] = [0x7F, 0xFF, 0x00];
 
 /// The most key events one read returns (the FIFO holds 10).
 const MAX_EVENTS: usize = 10;
+
+/// Key events taken from [`Tca8418`], in order.
+pub type Events = iter::Flatten<array::IntoIter<Option<KeyEvent>, MAX_EVENTS>>;
+
+/// No key events.
+pub fn no_events() -> Events {
+    [None; MAX_EVENTS].into_iter().flatten()
+}
 
 /// Why the controller is being read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +103,7 @@ impl<I: I2c> Tca8418<I> {
     }
 
     /// The events read and not yet returned, if there are any.
-    pub fn take_events(&mut self) -> Option<impl Iterator<Item = KeyEvent> + use<I>> {
+    pub fn take_events(&mut self) -> Option<Events> {
         if self.count == 0 {
             return None;
         }

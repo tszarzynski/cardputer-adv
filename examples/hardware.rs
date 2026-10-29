@@ -6,15 +6,18 @@
 //!    camera shows the IR LED), and moves the motion sensor on to its next
 //!    power mode (step 4's line names it; low-power reads noisier). The
 //!    speaker beeps what the press was: a click high, a double click
-//!    higher, a long press low; the log names it too.
+//!    higher, a long press low; the log names it too. A double click also
+//!    moves the accelerometer on to its next range, and a long press the
+//!    gyroscope (the readings' lines name them; at rest they read the
+//!    same).
 //! 3. Clap near it: the microphone.
 //! 4. Tilt it on its side: the motion sensor. The gyroscope's line shows
 //!    how fast it's turning, so it reads about 0 whenever it's still.
 //! 5. Watch the RGB LED cycle red, green, blue and off. Nothing can see it,
 //!    so this line stays white.
 //! 6. Type a capital (Shift) and an arrow (Fn + `;` `,` `.` `/`): the
-//!    keyboard. Its line shows the last key typed; the log has each key
-//!    going down and coming up, and whether Shift and Fn are held.
+//!    keyboard. Its line shows the last key typed, and the log each, and
+//!    whether Shift and Fn are held. Hold a key: it repeats, after 0.4 s.
 //!
 //! The motion sensor's temperature and the microSD card's size (if there's
 //! one) show too, and everything is logged over USB as well.
@@ -36,10 +39,11 @@ use core::{
 };
 
 use cardputer_adv::{
-    Acceleration, AudioPins, Button, Click, Decibels, Display, Hertz, Imu, ImuMode, IrTransmitter,
-    Keyboard, Motion, NecCode, Percent, Pulse, RgbLed, Rotation, Tone,
+    Acceleration, AccelerometerRange, AudioPins, Button, Click, Decibels, Display, GyroscopeRange,
+    Hertz, Imu, ImuMode, IrTransmitter, Keyboard, Motion, NecCode, Percent, Pulse, Repeat, RgbLed,
+    Rotation, Tone,
     embedded_sdmmc::BlockDevice,
-    keys::{KeyEvent, KeyInput, Modifier},
+    keys::{KeyInput, Modifier},
 };
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -66,8 +70,12 @@ static AUDIO_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
 /// to show: drawing or logging in the audio task would hold the streams up.
 static HEARD: Signal<CriticalSectionRawMutex, Heard> = Signal::new();
 
-/// G0 presses so far.
+/// G0 presses so far, and of them double clicks and long presses: each
+/// moves the motion sensor on to its next mode, and its accelerometer's or
+/// gyroscope's next range.
 static PRESSES: AtomicU32 = AtomicU32::new(0);
+static DOUBLE_CLICKS: AtomicU32 = AtomicU32::new(0);
+static LONG_PRESSES: AtomicU32 = AtomicU32::new(0);
 /// A beep for the audio task to play.
 static BEEP: Signal<CriticalSectionRawMutex, Tone> = Signal::new();
 
@@ -92,6 +100,20 @@ const CLAP_PEAK: u16 = 8000;
 const TILTED_MG: i32 = 700;
 /// The motion sensor's modes, a G0 press each.
 const MODES: [ImuMode; 3] = [ImuMode::Performance, ImuMode::Normal, ImuMode::LowPower];
+/// The ranges, a double click or a long press each.
+const ACCELEROMETER_RANGES: [AccelerometerRange; 4] = [
+    AccelerometerRange::G8,
+    AccelerometerRange::G2,
+    AccelerometerRange::G4,
+    AccelerometerRange::G16,
+];
+const GYROSCOPE_RANGES: [GyroscopeRange; 5] = [
+    GyroscopeRange::Dps2000,
+    GyroscopeRange::Dps125,
+    GyroscopeRange::Dps250,
+    GyroscopeRange::Dps500,
+    GyroscopeRange::Dps1000,
+];
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -110,9 +132,10 @@ async fn main(spawner: Spawner) -> ! {
     let mut imu = cardputer_adv::imu(bus).await.expect("motion sensor");
     imu.calibrate_gyroscope().await.expect("gyroscope");
     info!("{imu:?}");
-    let keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11)
+    let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11)
         .await
         .expect("keyboard");
+    keyboard.set_repeat(Some(Repeat::default()));
 
     let card = cardputer_adv::sd_card(cardputer_adv::sd_card_pins!(p)).expect("microSD bus");
     match card.num_blocks() {
@@ -169,8 +192,14 @@ async fn remote(mut button: Button, mut ir: IrTransmitter) {
     loop {
         let click = button.wait_for_click().await;
         let pitch = match click {
-            Click::Double => 1320,
-            Click::Long => 440,
+            Click::Double => {
+                DOUBLE_CLICKS.fetch_add(1, Ordering::Relaxed);
+                1320
+            }
+            Click::Long => {
+                LONG_PRESSES.fetch_add(1, Ordering::Relaxed);
+                440
+            }
             _ => 880,
         };
         BEEP.signal(
@@ -198,18 +227,13 @@ async fn remote(mut button: Button, mut ir: IrTransmitter) {
     }
 }
 
-/// Logs each key typed, and passes it on to be shown.
+/// Logs each key typed, repeats among them, and passes it on to be shown.
 #[embassy_executor::task]
 async fn typing(mut keyboard: Keyboard) {
     loop {
-        match keyboard.wait_for_events().await {
-            Ok(events) => {
-                for event in events {
-                    let input = event.input();
-                    if let KeyEvent::Released(_) = event {
-                        info!("key up: {input}");
-                        continue;
-                    }
+        match keyboard.wait_for_inputs().await {
+            Ok(inputs) => {
+                for input in inputs {
                     info!("key: {input:?} ({input}, as text {:?})", input.char());
                     match input {
                         KeyInput::Char(c) if c.is_ascii_uppercase() => {
@@ -286,7 +310,8 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
         false,
         format_args!("5. By eye: LED red, green, blue, off"),
     );
-    let (mut loudest, mut tilted, mut typed, mut mode_presses) = (0, false, None, 0);
+    let (mut loudest, mut tilted, mut typed) = (0, false, None);
+    let (mut mode_presses, mut double_clicks, mut long_presses) = (0, 0, 0);
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
         let presses = PRESSES.load(Ordering::Relaxed);
@@ -301,6 +326,24 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
             match imu.set_mode(mode).await {
                 Ok(()) => info!("motion sensor: {mode:?}"),
                 Err(error) => warn!("motion sensor mode: {error}"),
+            }
+        }
+        let doubles = DOUBLE_CLICKS.load(Ordering::Relaxed);
+        if doubles != double_clicks {
+            double_clicks = doubles;
+            let range = ACCELEROMETER_RANGES[doubles as usize % ACCELEROMETER_RANGES.len()];
+            match imu.set_accelerometer_range(range).await {
+                Ok(()) => info!("accelerometer: {range:?}"),
+                Err(error) => warn!("accelerometer range: {error}"),
+            }
+        }
+        let longs = LONG_PRESSES.load(Ordering::Relaxed);
+        if longs != long_presses {
+            long_presses = longs;
+            let range = GYROSCOPE_RANGES[longs as usize % GYROSCOPE_RANGES.len()];
+            match imu.set_gyroscope_range(range).await {
+                Ok(()) => info!("gyroscope: {range:?}"),
+                Err(error) => warn!("gyroscope range: {error}"),
             }
         }
 
@@ -323,10 +366,12 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
                 tilted |= x.abs() >= TILTED_MG || y.abs() >= TILTED_MG;
                 let mode = imu.mode();
                 screen.show(4, tilted, format_args!("4. Tilt it on its side ({mode:?})"));
-                screen.show(5, false, format_args!("   accel {x} {y} {z} mg"));
+                let range = imu.accelerometer_range();
+                screen.show(5, false, format_args!("   accel {x} {y} {z} mg {range:?}"));
                 let Rotation { x, y, z } = rotation;
                 let [rx, ry, rz] = [x, y, z].map(|m| m / 1000);
-                screen.show(6, false, format_args!("   turning {rx} {ry} {rz} deg/s"));
+                let range = imu.gyroscope_range();
+                screen.show(6, false, format_args!("   turn {rx} {ry} {rz} {range:?}"));
             }
             Err(error) => warn!("motion: {error}"),
         }

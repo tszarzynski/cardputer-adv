@@ -1,9 +1,9 @@
 //! The keyboard: a TCA8418 on the I2C bus, and its interrupt line.
 
-use core::fmt;
+use core::{fmt, time};
 
 use embassy_futures::select::{Either, select};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_hal::{
     gpio::{Event, Input, InputConfig, Pull},
     peripherals::GPIO11,
@@ -12,7 +12,8 @@ use esp_hal::{
 use crate::{
     Error, I2cBus, I2cDevice, I2cPins, i2c,
     keys::{KeyEvent, KeyInput},
-    tca8418::{Tca8418, Wake},
+    repeat::{Repeat, Repeater},
+    tca8418::{Events, Tca8418, Wake, no_events},
 };
 
 /// The peripherals the keyboard uses.
@@ -36,11 +37,18 @@ const SPURIOUS_BACKOFF: Duration = Duration::from_millis(10);
 pub struct Keyboard {
     controller: Tca8418<I2cDevice>,
     interrupt: Input<'static>,
+    repeater: Repeater,
+}
+
+/// The time since boot, as the repeater keeps it.
+fn now() -> time::Duration {
+    time::Duration::from_micros(Instant::now().as_micros())
 }
 
 impl Keyboard {
-    /// Waits for key presses and returns them (with Shift/Fn applied).
-    /// Releases are dropped: [`wait_for_events`](Self::wait_for_events)
+    /// Waits for key presses and returns them (with Shift/Fn applied), and
+    /// a held key's repeats if [`set_repeat`](Self::set_repeat) turned them
+    /// on. Releases are dropped: [`wait_for_events`](Self::wait_for_events)
     /// returns those too.
     ///
     /// Waits as [`wait_for_events`](Self::wait_for_events) does, and can be
@@ -53,16 +61,38 @@ impl Keyboard {
         &mut self,
     ) -> Result<impl Iterator<Item = KeyInput> + use<>, Error> {
         loop {
-            let mut presses = self
-                .wait_for_events()
-                .await?
+            let (events, repeated) = match self.repeater.next_at() {
+                Some(at) => {
+                    let at =
+                        Instant::from_micros(u64::try_from(at.as_micros()).unwrap_or(u64::MAX));
+                    match select(self.events(), Timer::at(at)).await {
+                        Either::First(events) => (events?, None),
+                        Either::Second(()) => (no_events(), self.repeater.due(now())),
+                    }
+                }
+                None => (self.events().await?, None),
+            };
+            let mut inputs = events
                 .filter(|event| event.is_press())
                 .map(KeyEvent::input)
+                .chain(repeated)
                 .peekable();
-            if presses.peek().is_some() {
-                return Ok(presses);
+            if inputs.peek().is_some() {
+                return Ok(inputs);
             }
         }
+    }
+
+    /// Turns auto-repeat on, as `repeat`, or off (`None`, as
+    /// [`keyboard`] leaves it): a key held past the delay is typed again
+    /// every interval, by [`wait_for_inputs`](Self::wait_for_inputs), as on
+    /// a PC. For text and menus; [`Repeat::default`] is about a PC's.
+    ///
+    /// The last key pressed repeats, until it's released or another is
+    /// pressed; modifiers don't. [`wait_for_events`](Self::wait_for_events)
+    /// returns only the keys' own presses and releases, for games.
+    pub const fn set_repeat(&mut self, repeat: Option<Repeat>) {
+        self.repeater.set(repeat);
     }
 
     /// Waits for keys going down or coming up, and returns them in order:
@@ -84,10 +114,20 @@ impl Keyboard {
     pub async fn wait_for_events(
         &mut self,
     ) -> Result<impl Iterator<Item = KeyEvent> + use<>, Error> {
+        self.events().await
+    }
+
+    /// [`wait_for_events`](Self::wait_for_events), as the type it is, and
+    /// passing the events to the repeater.
+    async fn events(&mut self) -> Result<Events, Error> {
         loop {
             // Events read by a call that was cancelled: return them before
             // anything else, which could fail.
             if let Some(events) = self.controller.take_events() {
+                let now = now();
+                for event in events.clone() {
+                    self.repeater.event(event, now);
+                }
                 return Ok(events);
             }
             let wake = if self.controller.is_pending() {
@@ -180,6 +220,7 @@ pub async fn keyboard_on(
         controller: Tca8418::new(I2cDevice::new(bus)),
         // The TCA8418's INT is open-drain.
         interrupt: Input::new(interrupt, InputConfig::default().with_pull(Pull::Up)),
+        repeater: Repeater::new(),
     };
     for attempt in 0..KEYBOARD_TRIES {
         if attempt > 0 {

@@ -9,8 +9,8 @@ use embedded_hal_async::i2c::I2c as _;
 use crate::{
     Acceleration, Error, I2cBus, I2cDevice, Millicelsius, Motion, Rotation,
     bmi270::{
-        self, ACC_RANGE_8G, ACCELEROMETER_ON, ADVANCED_POWER_SAVE, GYR_RANGE_2000, GYROSCOPE_ON,
-        INITIALISED, ImuMode, SOFT_RESET, UPLOAD_CHUNK, register,
+        self, ACCELEROMETER_ON, ADVANCED_POWER_SAVE, AccelerometerRange, GYROSCOPE_ON,
+        GyroscopeRange, INITIALISED, ImuMode, SOFT_RESET, UPLOAD_CHUNK, register,
     },
     convert::{milli_g, millicelsius, millidegrees_per_second},
 };
@@ -30,15 +30,24 @@ const GYROSCOPE_START: Duration = Duration::from_millis(50);
 /// measurement (100 Hz): a third of a second.
 const CALIBRATION_SAMPLES: i32 = 32;
 const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
+/// How long a new range takes to reach the readings. Setting one restarts
+/// the sensor's filter, and the last reading, in the old range, stays for up
+/// to 60 ms (measured on the ADV).
+const RANGE_CHANGE: Duration = Duration::from_millis(80);
 
-/// The BMI270: its accelerometer, ±8 g at 100 Hz, and its gyroscope,
-/// ±2000 °/s at 100 Hz once [turned on](Self::set_gyroscope), both in its
-/// [power mode](Self::set_mode).
+/// The BMI270 motion sensor: its accelerometer, and its gyroscope once
+/// [turned on](Self::set_gyroscope).
+///
+/// Both sample at 100 Hz, in its [power mode](Self::set_mode), at ±8 g
+/// and ±2000 °/s unless [set](Self::set_accelerometer_range)
+/// [otherwise](Self::set_gyroscope_range).
 pub struct Imu {
     device: I2cDevice,
     /// Where it answered: 0x68 or 0x69.
     address: u8,
     mode: ImuMode,
+    accelerometer_range: AccelerometerRange,
+    gyroscope_range: GyroscopeRange,
     /// The gyroscope's raw reading at rest, taken off each reading.
     gyroscope_offset: [i32; 3],
 }
@@ -51,7 +60,56 @@ impl Imu {
     /// If the sensor can't be read.
     pub async fn acceleration(&mut self) -> Result<Acceleration, Error> {
         let raw = self.axes(register::ACC_DATA).await?;
-        Ok(acceleration(raw))
+        Ok(self.acceleration_from(raw))
+    }
+
+    /// Sets the accelerometer's range: ±2 g reads tilt four times as finely
+    /// as the ±8 g [`imu`] starts at, and clips anything past 2 g (a
+    /// shake). Readings are in milli-g whatever the range. It takes 80 ms,
+    /// so the next reading is in the new range.
+    ///
+    /// # Errors
+    ///
+    /// If the sensor doesn't answer.
+    pub async fn set_accelerometer_range(
+        &mut self,
+        range: AccelerometerRange,
+    ) -> Result<(), Error> {
+        self.write(register::ACC_RANGE, range.register()).await?;
+        Timer::after(RANGE_CHANGE).await;
+        self.accelerometer_range = range;
+        Ok(())
+    }
+
+    /// The accelerometer's range.
+    #[must_use]
+    pub const fn accelerometer_range(&self) -> AccelerometerRange {
+        self.accelerometer_range
+    }
+
+    /// Sets the gyroscope's range: a narrower one reads slow turns more
+    /// finely, and clips fast ones. Readings are in milli-degrees a second
+    /// whatever the range, and a [calibration](Self::calibrate_gyroscope)
+    /// carries over. It applies whether the gyroscope is on or not, and
+    /// takes 80 ms, so the next reading is in the new range.
+    ///
+    /// # Errors
+    ///
+    /// If the sensor doesn't answer.
+    pub async fn set_gyroscope_range(&mut self, range: GyroscopeRange) -> Result<(), Error> {
+        self.write(register::GYR_RANGE, range.register()).await?;
+        Timer::after(RANGE_CHANGE).await;
+        // The offset is in counts, which the range scales.
+        let (from, to) = (self.gyroscope_range.full_scale(), range.full_scale());
+        self.gyroscope_offset = self.gyroscope_offset.map(|offset| offset * from / to);
+        self.gyroscope_range = range;
+        Ok(())
+    }
+
+    /// The gyroscope's range.
+    #[must_use]
+    pub const fn gyroscope_range(&self) -> GyroscopeRange {
+        self.gyroscope_range
     }
 
     /// The acceleration and the rotation rate now, in one read, so both are
@@ -71,7 +129,7 @@ impl Imu {
             .map_err(|_| Error::Imu)?;
         let [a0, a1, a2, a3, a4, a5, g0, g1, g2, g3, g4, g5] = data;
         Ok(Motion {
-            acceleration: acceleration(bmi270::axes([a0, a1, a2, a3, a4, a5])),
+            acceleration: self.acceleration_from(bmi270::axes([a0, a1, a2, a3, a4, a5])),
             rotation: self.rotation_from(bmi270::axes([g0, g1, g2, g3, g4, g5])),
         })
     }
@@ -110,7 +168,8 @@ impl Imu {
     /// If the sensor doesn't answer.
     pub async fn set_gyroscope(&mut self, on: bool) -> Result<(), Error> {
         if on {
-            self.write(register::GYR_RANGE, GYR_RANGE_2000).await?;
+            self.write(register::GYR_RANGE, self.gyroscope_range.register())
+                .await?;
             self.write(register::GYR_CONF, self.mode.gyr_conf()).await?;
         }
         self.set_power(on).await
@@ -201,7 +260,8 @@ impl Imu {
         if self.read(register::INTERNAL_STATUS).await? & INITIALISED == 0 {
             return Err(Error::Imu);
         }
-        self.write(register::ACC_RANGE, ACC_RANGE_8G).await?;
+        self.write(register::ACC_RANGE, self.accelerometer_range.register())
+            .await?;
         self.write(register::ACC_CONF, self.mode.acc_conf()).await?;
         self.set_power(false).await
     }
@@ -217,11 +277,20 @@ impl Imu {
         self.write(register::PWR_CONF, config).await
     }
 
+    /// An accelerometer reading in the sensor's counts, in milli-g.
+    fn acceleration_from(&self, raw: [i32; 3]) -> Acceleration {
+        let full_scale = self.accelerometer_range.full_scale();
+        let [x, y, z] = raw.map(|count| milli_g(count, full_scale));
+        Acceleration { x, y, z }
+    }
+
     /// A gyroscope reading in the sensor's counts as a rotation rate, its
     /// offset taken off.
     fn rotation_from(&self, raw: [i32; 3]) -> Rotation {
-        let [x, y, z] =
-            array::from_fn(|axis| millidegrees_per_second(raw[axis] - self.gyroscope_offset[axis]));
+        let full_scale = self.gyroscope_range.full_scale();
+        let [x, y, z] = array::from_fn(|axis| {
+            millidegrees_per_second(raw[axis] - self.gyroscope_offset[axis], full_scale)
+        });
         Rotation { x, y, z }
     }
 
@@ -261,12 +330,6 @@ impl Imu {
     }
 }
 
-/// An accelerometer reading in the sensor's counts, in milli-g.
-fn acceleration(raw: [i32; 3]) -> Acceleration {
-    let [x, y, z] = raw.map(milli_g);
-    Acceleration { x, y, z }
-}
-
 /// Starts the BMI270 on the shared bus: finds it at either of its addresses,
 /// uploads its configuration and turns the accelerometer on.
 ///
@@ -282,6 +345,8 @@ pub async fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
             device: I2cDevice::new(bus),
             address,
             mode: ImuMode::default(),
+            accelerometer_range: AccelerometerRange::default(),
+            gyroscope_range: GyroscopeRange::default(),
             gyroscope_offset: [0; 3],
         };
         if imu
@@ -301,6 +366,8 @@ impl fmt::Debug for Imu {
         f.debug_struct("Imu")
             .field("address", &self.address)
             .field("mode", &self.mode)
+            .field("accelerometer_range", &self.accelerometer_range)
+            .field("gyroscope_range", &self.gyroscope_range)
             .field("gyroscope_offset", &self.gyroscope_offset)
             .finish_non_exhaustive()
     }
