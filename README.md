@@ -14,7 +14,7 @@ What the Cardputer ADV has, and what this crate covers so far.
 |---|---|---|
 | LCD, 1.14" ST7789V2, 240×135 | ✅ drawing directly, or a framebuffer sent by DMA; the controller's sleep | `display`, `frame_display`, `Frame`, `FrameDisplay::flush`, `FrameDisplay::set_asleep` |
 | Backlight (GPIO38) | ✅ dimmable, 0–100% | `Backlight::set_brightness` |
-| Keyboard, 56 keys (TCA8418) | ✅ Shift and Fn layers, interrupt-driven, wakes the chip from light sleep | `keyboard`, `keyboard_on`, `Keyboard::wait_for_inputs`, `Keyboard::listen_for_wake` |
+| Keyboard, 56 keys (TCA8418) | ✅ Shift and Fn layers, interrupt-driven, wakes the chip from light sleep | `keyboard`, `keyboard_on`, `Keyboard::wait_for_inputs`, `Keyboard::is_held`, `Keyboard::listen_for_wake` |
 | Motion sensor (BMI270) | ✅ accelerometer, ±8 g at 100 Hz; gyroscope, ±2000 °/s at 100 Hz; ❌ motion interrupts | `imu`, `Imu::acceleration`, `Imu::set_gyroscope`, `Imu::calibrate_gyroscope`, `Imu::rotation` |
 | Speaker (ES8311 codec, NS4150B amplifier) | ✅ playing samples at 44.1 kHz, volume, output off for sleep | `speaker`, `Speaker::run`, `codec`, `Codec` |
 | Microphone (through the ES8311, I2S in on GPIO46) | ✅ recording at 44.1 kHz, alongside the speaker; preamp gain | `audio`, `Audio::run`, `Codec::set_microphone`, `Codec::set_microphone_gain` |
@@ -38,6 +38,7 @@ What the Cardputer ADV has, and what this crate covers so far.
   - It waits for the low level, not an edge, so events that arrive while you're busy aren't lost.
   - A 1 s fallback poll covers a missed interrupt; `missed_interrupts()` counts how often that poll was needed.
   - Cancelling it (in a `select`) loses no key it has read: the next call returns it.
+  - `Keyboard::is_held(input)` says whether a key that types `input` is down, with or without Shift and Fn (`Char('a')` and `Char('A')` are both the A key, `Arrow(Up)` the `;` key): for games, and chords such as Ctrl + C. It's as of the last event read, and `wait_for_inputs` reads them as they come while it's waiting, releases too.
   - `Keyboard::listen_for_wake()`, just before esp-hal's `LowPower::sleep_light`, makes a key press end the light sleep; `wait_for_inputs` then reads the key.
 - `imu(&I2cBus).await` finds the BMI270 motion sensor (at 0x68 or 0x69), uploads its configuration (Bosch's, from [bmi2](https://crates.io/crates/bmi2)) and turns on its accelerometer at ±8 g and 100 Hz. `Imu::acceleration().await` reads it in milli-g.
 - `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `codec(&I2cBus).await` then turns on the codec's DAC path to the NS4150B amplifier and returns a `Codec`, whose `set_volume(percent).await` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.

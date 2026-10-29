@@ -62,50 +62,75 @@ const fn fn_layer(key: Key) -> Option<KeyInput> {
     })
 }
 
-/// Turns the TCA8418's key events into what they type, following which of
-/// Shift and Fn are held.
+/// What `key` types, with Shift or Fn held or not.
+const fn typed(key: Key, shift: bool, fn_held: bool) -> KeyInput {
+    if fn_held && let Some(input) = fn_layer(key) {
+        return input;
+    }
+    match key {
+        Key::Char(plain, shifted) => KeyInput::Char(if shift { shifted } else { plain }),
+        Key::Modifier(modifier) => KeyInput::Modifier(modifier),
+        Key::Enter => KeyInput::Enter,
+        Key::Backspace => KeyInput::Backspace,
+        Key::Tab => KeyInput::Tab,
+    }
+}
+
+/// Turns the TCA8418's key events into what they type, following which
+/// keys are held (Shift and Fn among them).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Keymap {
-    shift: bool,
-    fn_held: bool,
+    /// The keys held: a bit for each key number.
+    held: u128,
 }
 
 impl Keymap {
     /// No keys held.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            shift: false,
-            fn_held: false,
-        }
+        Self { held: 0 }
     }
 
     /// What a key event (a `KEY_EVENT_A` byte: bit 7 set for a press, then
     /// the key number) types: `None` for a release, or a number that isn't
     /// a key. A modifier's own press types [`KeyInput::Modifier`].
     pub fn input(&mut self, event: u8) -> Option<KeyInput> {
+        let number = event & 0x7F;
+        let key = key(number)?;
         let pressed = event & 0x80 != 0;
-        let key = key(event & 0x7F)?;
-        match key {
-            Key::Modifier(Modifier::Shift) => self.shift = pressed,
-            Key::Modifier(Modifier::Fn) => self.fn_held = pressed,
-            _ => {}
+        if pressed {
+            self.held |= 1 << number;
+        } else {
+            self.held &= !(1 << number);
         }
-        if !pressed {
-            return None;
-        }
-        if self.fn_held
-            && let Some(input) = fn_layer(key)
-        {
-            return Some(input);
-        }
-        Some(match key {
-            Key::Char(plain, shifted) => KeyInput::Char(if self.shift { shifted } else { plain }),
-            Key::Modifier(modifier) => KeyInput::Modifier(modifier),
-            Key::Enter => KeyInput::Enter,
-            Key::Backspace => KeyInput::Backspace,
-            Key::Tab => KeyInput::Tab,
+        pressed.then(|| {
+            typed(
+                key,
+                self.holds(Key::Modifier(Modifier::Shift)),
+                self.holds(Key::Modifier(Modifier::Fn)),
+            )
         })
+    }
+
+    /// Whether a key that types `input`, with or without Shift or Fn, is
+    /// held.
+    #[must_use]
+    pub fn is_held(&self, input: KeyInput) -> bool {
+        self.held_keys().any(|key| {
+            [(false, false), (true, false), (false, true)]
+                .into_iter()
+                .any(|(shift, fn_held)| typed(key, shift, fn_held) == input)
+        })
+    }
+
+    fn holds(&self, key: Key) -> bool {
+        self.held_keys().any(|held| held == key)
+    }
+
+    fn held_keys(&self) -> impl Iterator<Item = Key> + use<'_> {
+        (1..=80)
+            .filter(|&number| self.held & 1 << number != 0)
+            .filter_map(key)
     }
 }
 
@@ -149,6 +174,32 @@ mod tests {
         );
         // Nothing on the Fn layer: Shift still applies.
         assert_eq!(keymap.input(press(A)), Some(KeyInput::Char('A')));
+    }
+
+    #[test]
+    fn a_key_is_held_from_its_press_to_its_release() {
+        let mut keymap = Keymap::default();
+        assert!(!keymap.is_held(KeyInput::Char('a')));
+        keymap.input(press(A));
+        assert!(keymap.is_held(KeyInput::Char('a')));
+        assert!(keymap.is_held(KeyInput::Char('A')), "the same key");
+        assert!(!keymap.is_held(KeyInput::Char('s')));
+        keymap.input(A);
+        assert!(!keymap.is_held(KeyInput::Char('a')));
+    }
+
+    #[test]
+    fn modifiers_and_fn_layer_keys_are_held_too() {
+        let mut keymap = Keymap::default();
+        keymap.input(press(FN));
+        keymap.input(press(SEMICOLON));
+        assert!(keymap.is_held(KeyInput::Modifier(Modifier::Fn)));
+        assert!(keymap.is_held(KeyInput::Arrow(Arrow::Up)));
+        assert!(keymap.is_held(KeyInput::Char(';')), "the same key");
+        assert!(!keymap.is_held(KeyInput::Modifier(Modifier::Shift)));
+        keymap.input(FN);
+        // The key is still down, whatever it would type now.
+        assert!(keymap.is_held(KeyInput::Arrow(Arrow::Up)));
     }
 
     #[test]

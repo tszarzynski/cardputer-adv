@@ -13,6 +13,7 @@ follows [Semantic Versioning](https://semver.org/).
   - The keyboard and the motion sensor have drivers of their own, for the async bus. `keys` is this crate's (`KeyInput`, `Arrow` and `Modifier`, as before) instead of a re-export of cardputer-adv-keyboard, which isn't a dependency any more; `Keyboard::driver_mut` is gone. bmi2 is now only where the BMI270's configuration comes from.
   - `KeyInput`, `Arrow` and `Modifier` are `#[non_exhaustive]`, so keys can be added without a breaking change: a `match` on them needs a `_` arm.
 - `Keyboard::wait_for_inputs` keeps the keys it has read when it's cancelled, and returns them next time.
+- `Keyboard::is_held` says whether a key is held down (for games, and chords such as Ctrl + C), by what it types with or without Shift and Fn.
 - README: the framebuffer and sleep examples compile (`Frame::clear` can't fail, so no `?`; the sleep example imports `Duration` and `Instant`).
 - CI: `just semver` checks the public API against the last release on crates.io with cargo-semver-checks, so a breaking change can't go out without a new version.
 - Host tests: the keyboard's controller (`tca8418`, apart from its interrupt line and the waiting) runs against a fake TCA8418, covering a read that's cancelled partway, a failed read or flag clear, events left in the FIFO, and the missed-interrupt count.

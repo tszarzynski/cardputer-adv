@@ -89,6 +89,22 @@ impl Keyboard {
         self.interrupt.listen(Event::LowLevel);
     }
 
+    /// Whether a key that types `input` is held down, with or without
+    /// Shift and Fn: `Char('a')` and `Char('A')` are both the A key, and
+    /// `Arrow(Arrow::Up)` is the `;` key. For games, and for chords such as
+    /// Ctrl + C (`Modifier(Modifier::Ctrl)` held when `c` comes).
+    ///
+    /// It's as of the last key event read. [`wait_for_inputs`] reads
+    /// events, releases among them, as they come while it's waiting, so
+    /// keep it waiting (in a `select` with a frame timer, say) for this to
+    /// stay current.
+    ///
+    /// [`wait_for_inputs`]: Self::wait_for_inputs
+    #[must_use]
+    pub fn is_held(&self, input: KeyInput) -> bool {
+        self.controller.is_held(input)
+    }
+
     /// How many times key events were found only by the fallback poll, which
     /// points at a broken interrupt line.
     #[must_use]

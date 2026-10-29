@@ -138,6 +138,13 @@ impl<I: I2c> Tca8418<I> {
         Ok(count)
     }
 
+    /// Whether a key that types `input`, with or without Shift or Fn, is
+    /// held, as of the last event read.
+    #[must_use]
+    pub fn is_held(&self, input: KeyInput) -> bool {
+        self.keymap.is_held(input)
+    }
+
     /// Whether events arrived while the last batch was being read, to be
     /// read without waiting.
     pub const fn is_pending(&self) -> bool {
