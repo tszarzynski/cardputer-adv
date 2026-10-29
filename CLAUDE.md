@@ -4,7 +4,7 @@
 
 ## Before committing
 
-- `just` (fmt check, and clippy for the Xtensa target with no features and with all of them, and on the example; then the host tests, `just test`) must pass, and `just build` and `just doc` (warnings are errors). CI (`.github/workflows/ci.yml`) runs the same recipes, plus `just package`, and publishes the docs to GitHub Pages from `main`.
+- `just` (fmt check, and clippy for the Xtensa target with no features and with all of them, and on the example; the README's examples compiled, `just readme`; then the host tests, `just test`) must pass, and `just build` and `just doc` (warnings are errors). CI (`.github/workflows/ci.yml`) runs the same recipes, plus `just package`, and publishes the docs to GitHub Pages from `main`.
 - Then build both apps against the change, with that local `[patch.crates-io]` in each: `just build` and `just clippy` in backgammon, `just cardputer build` and `just cardputer clippy` in chord-detector. A breaking change updates their call sites in the same session.
 - Hardware behaviour can only be checked on a Cardputer: `just hardware` flashes `examples/hardware.rs`, which tries each part and logs what it does, or flash one of the apps. A new part gets a line in that example.
 

@@ -1,0 +1,23 @@
+# The README's examples and the crate docs' quick start, compiled for the
+# ESP32-S3 so they can't go stale: `just readme`. Not published.
+[package]
+name = "cardputer-adv-readme"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Its own workspace, apart from the crate's.
+[workspace]
+
+[[bin]]
+name = "readme"
+path = "readme.rs"
+test = false
+bench = false
+
+# What the examples use, at the versions the crate and its example use.
+[dependencies]
+cardputer-adv = { path = ".." }
+embedded-graphics = "0.8.2"
+esp-hal = { version = "~1.2.2", features = ["esp32s3", "unstable"] }
+static_cell = "2.1.1"

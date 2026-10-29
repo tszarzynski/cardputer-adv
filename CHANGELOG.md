@@ -14,6 +14,7 @@ follows [Semantic Versioning](https://semver.org/).
   - `KeyInput`, `Arrow` and `Modifier` are `#[non_exhaustive]`, so keys can be added without a breaking change: a `match` on them needs a `_` arm.
 - `Keyboard::wait_for_inputs` keeps the keys it has read when it's cancelled, and returns them next time.
 - README: the framebuffer and sleep examples compile (`Frame::clear` can't fail, so no `?`; the sleep example imports `Duration` and `Instant`).
+- The README's examples and the crate docs' quick start are compiled by `just readme` (part of `just check`, so CI), so they can't go stale again.
 
 ## [0.3.0] - 2026-10-28
 

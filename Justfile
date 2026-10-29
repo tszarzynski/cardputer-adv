@@ -5,9 +5,13 @@ default: check test
 # (CI's toolchain action sets it up itself).
 esp := "if [ -f ~/export-esp.sh ]; then . ~/export-esp.sh; fi"
 
-# formatting, and clippy (pedantic and nursery; warnings are errors), with no features and with all of them, and the example
-check:
+# formatting, and clippy (pedantic and nursery; warnings are errors), with no features and with all of them, and the example; then the README's examples
+check: && readme
     {{esp}} && cargo fmt -- --check && cargo clippy --release -- -D warnings && cargo clippy --release --all-features --example hardware -- -D warnings
+
+# the README's examples and the crate docs' quick start, compiled (readme-check/ takes them out of their files), with fmt and clippy on its own code
+readme:
+    {{esp}} && cd readme-check && cargo fmt -- --check && cargo clippy --target-dir ../target -- -D warnings
 
 # the pure logic's tests, on the host with stable Rust (host-tests/ builds those modules from src/), with fmt and clippy on them
 test:
