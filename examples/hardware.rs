@@ -3,14 +3,16 @@
 //!
 //! 1. Lie it flat and still while it starts: the gyroscope calibrates.
 //! 2. Press G0 three times: each press sends an NEC code over IR (a phone
-//!    camera shows the IR LED).
+//!    camera shows the IR LED), and moves the motion sensor on to its next
+//!    power mode (step 4's line names it; low-power reads noisier).
 //! 3. Clap near it: the microphone.
 //! 4. Tilt it on its side: the motion sensor. The gyroscope's line shows
 //!    how fast it's turning, so it reads about 0 whenever it's still.
 //! 5. Watch the RGB LED cycle red, green, blue and off. Nothing can see it,
 //!    so this line stays white.
 //! 6. Type a capital (Shift) and an arrow (Fn + `;` `,` `.` `/`): the
-//!    keyboard. Its line shows the last key typed.
+//!    keyboard. Its line shows the last key typed, and the log whether
+//!    Shift and Fn are held after each.
 //!
 //! The microSD card's size shows too, if there's one, and everything is
 //! logged over USB as well.
@@ -31,8 +33,10 @@ use core::{
 };
 
 use cardputer_adv::{
-    Acceleration, AudioPins, Button, Decibels, Display, Imu, IrTransmitter, Keyboard, NecCode,
-    Pulse, RgbLed, Rotation, embedded_sdmmc::BlockDevice, keys::KeyInput,
+    Acceleration, AudioPins, Button, Decibels, Display, Imu, ImuMode, IrTransmitter, Keyboard,
+    NecCode, Pulse, RgbLed, Rotation,
+    embedded_sdmmc::BlockDevice,
+    keys::{KeyInput, Modifier},
 };
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -81,6 +85,8 @@ struct Heard {
 const CLAP_PEAK: u16 = 8000;
 /// On its side, gravity is mostly along x or y (milli-g).
 const TILTED_MG: i32 = 700;
+/// The motion sensor's modes, a G0 press each.
+const MODES: [ImuMode; 3] = [ImuMode::Performance, ImuMode::Normal, ImuMode::LowPower];
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -196,6 +202,9 @@ async fn typing(mut keyboard: Keyboard) {
                     }
                     TYPED.signal(input);
                 }
+                let [shift, fn_held] = [Modifier::Shift, Modifier::Fn]
+                    .map(|modifier| keyboard.is_held(KeyInput::Modifier(modifier)));
+                info!("held: Shift {shift}, Fn {fn_held}");
             }
             Err(error) => {
                 warn!("keyboard: {error}");
@@ -240,7 +249,7 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
         false,
         format_args!("5. By eye: LED red, green, blue, off"),
     );
-    let (mut loudest, mut tilted, mut typed) = (0, false, None);
+    let (mut loudest, mut tilted, mut typed, mut mode_presses) = (0, false, None, 0);
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
         let presses = PRESSES.load(Ordering::Relaxed);
@@ -249,6 +258,14 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
             presses >= 3,
             format_args!("2. Press G0 3 times: {presses}"),
         );
+        if presses != mode_presses {
+            mode_presses = presses;
+            let mode = MODES[presses as usize % MODES.len()];
+            match imu.set_mode(mode).await {
+                Ok(()) => info!("motion sensor: {mode:?}"),
+                Err(error) => warn!("motion sensor mode: {error}"),
+            }
+        }
 
         if let Some(Heard { mean, level, peak }) = HEARD.try_take() {
             info!("microphone: level {level}, peak {peak}, mean {mean}");
@@ -264,7 +281,8 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
             (Ok(acceleration @ Acceleration { x, y, z }), Ok(rotation)) => {
                 info!("motion: {acceleration:?} mg, {rotation:?} m°/s");
                 tilted |= x.abs() >= TILTED_MG || y.abs() >= TILTED_MG;
-                screen.show(4, tilted, format_args!("4. Tilt it on its side"));
+                let mode = imu.mode();
+                screen.show(4, tilted, format_args!("4. Tilt it on its side ({mode:?})"));
                 screen.show(5, false, format_args!("   accel {x} {y} {z} mg"));
                 let Rotation { x, y, z } = rotation;
                 let [rx, ry, rz] = [x, y, z].map(|m| m / 1000);

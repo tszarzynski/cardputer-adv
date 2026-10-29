@@ -53,7 +53,9 @@ impl Keyboard {
     /// # Errors
     ///
     /// If the TCA8418 can't be read over I2C.
-    pub async fn wait_for_inputs(&mut self) -> Result<impl Iterator<Item = KeyInput>, Error> {
+    pub async fn wait_for_inputs(
+        &mut self,
+    ) -> Result<impl Iterator<Item = KeyInput> + use<>, Error> {
         loop {
             // Keys read by a call that was cancelled: return them before
             // anything else, which could fail.

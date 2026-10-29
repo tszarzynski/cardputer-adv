@@ -14,7 +14,7 @@ follows [Semantic Versioning](https://semver.org/).
   - `KeyInput`, `Arrow` and `Modifier` are `#[non_exhaustive]`, so keys can be added without a breaking change: a `match` on them needs a `_` arm.
 - `Keyboard::wait_for_inputs` keeps the keys it has read when it's cancelled, and returns them next time.
 - `Imu::set_mode` sets the motion sensor's power mode (`ImuMode`: `LowPower`, `Normal` or `Performance`, the datasheet's), trading current for noise. `imu` still starts in `Performance`, as before; `LowPower` takes the accelerometer from 210 µA down to a few µA.
-- `Keyboard::is_held` says whether a key is held down (for games, and chords such as Ctrl + C), by what it types with or without Shift and Fn.
+- `Keyboard::is_held` says whether a key is held down (for games, and chords such as Ctrl + C), by what it types with or without Shift and Fn. The keys `wait_for_inputs` returns no longer keep the keyboard borrowed, so it can be asked while going through them.
 - README: the framebuffer and sleep examples compile (`Frame::clear` can't fail, so no `?`; the sleep example imports `Duration` and `Instant`).
 - `examples/flush.rs` (`just flush`) times `FrameDisplay::flush` on a Cardputer for changed areas of different shapes, and logs it.
 - CI: `just semver` checks the public API against the last release on crates.io with cargo-semver-checks, so a breaking change can't go out without a new version.
