@@ -11,7 +11,7 @@ use esp_hal::{
 
 use crate::{
     Error, I2cBus, I2cDevice, I2cPins, i2c,
-    keys::KeyInput,
+    keys::{KeyEvent, KeyInput},
     tca8418::{Tca8418, Wake},
 };
 
@@ -40,6 +40,34 @@ pub struct Keyboard {
 
 impl Keyboard {
     /// Waits for key presses and returns them (with Shift/Fn applied).
+    /// Releases are dropped: [`wait_for_events`](Self::wait_for_events)
+    /// returns those too.
+    ///
+    /// Waits as [`wait_for_events`](Self::wait_for_events) does, and can be
+    /// cancelled the same way.
+    ///
+    /// # Errors
+    ///
+    /// If the TCA8418 can't be read over I2C.
+    pub async fn wait_for_inputs(
+        &mut self,
+    ) -> Result<impl Iterator<Item = KeyInput> + use<>, Error> {
+        loop {
+            let mut presses = self
+                .wait_for_events()
+                .await?
+                .filter(|event| event.is_press())
+                .map(KeyEvent::input)
+                .peekable();
+            if presses.peek().is_some() {
+                return Ok(presses);
+            }
+        }
+    }
+
+    /// Waits for keys going down or coming up, and returns them in order:
+    /// for games, where letting go of a key matters as much as pressing it.
+    /// A release says what its press typed.
     ///
     /// Sleeps until the TCA8418 pulls its interrupt line low, so an idle
     /// keyboard costs nothing. It waits for the low *level*, not an edge:
@@ -53,14 +81,14 @@ impl Keyboard {
     /// # Errors
     ///
     /// If the TCA8418 can't be read over I2C.
-    pub async fn wait_for_inputs(
+    pub async fn wait_for_events(
         &mut self,
-    ) -> Result<impl Iterator<Item = KeyInput> + use<>, Error> {
+    ) -> Result<impl Iterator<Item = KeyEvent> + use<>, Error> {
         loop {
-            // Keys read by a call that was cancelled: return them before
+            // Events read by a call that was cancelled: return them before
             // anything else, which could fail.
-            if let Some(inputs) = self.controller.take_inputs() {
-                return Ok(inputs);
+            if let Some(events) = self.controller.take_events() {
+                return Ok(events);
             }
             let wake = if self.controller.is_pending() {
                 Wake::Pending
@@ -96,12 +124,13 @@ impl Keyboard {
     /// `Arrow(Arrow::Up)` is the `;` key. For games, and for chords such as
     /// Ctrl + C (`Modifier(Modifier::Ctrl)` held when `c` comes).
     ///
-    /// It's as of the last key event read. [`wait_for_inputs`] reads
-    /// events, releases among them, as they come while it's waiting, so
-    /// keep it waiting (in a `select` with a frame timer, say) for this to
-    /// stay current.
+    /// It's as of the last key event read. [`wait_for_inputs`] and
+    /// [`wait_for_events`] read events, releases among them, as they come
+    /// while they're waiting, so keep one waiting (in a `select` with a
+    /// frame timer, say) for this to stay current.
     ///
     /// [`wait_for_inputs`]: Self::wait_for_inputs
+    /// [`wait_for_events`]: Self::wait_for_events
     #[must_use]
     pub fn is_held(&self, input: KeyInput) -> bool {
         self.controller.is_held(input)

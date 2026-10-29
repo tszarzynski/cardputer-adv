@@ -7,12 +7,12 @@ use embassy_time::{Duration, Timer};
 use embedded_hal_async::i2c::I2c as _;
 
 use crate::{
-    Acceleration, Error, I2cBus, I2cDevice, Rotation,
+    Acceleration, Error, I2cBus, I2cDevice, Millicelsius, Rotation,
     bmi270::{
         self, ACC_RANGE_8G, ACCELEROMETER_ON, ADVANCED_POWER_SAVE, GYR_RANGE_2000, GYROSCOPE_ON,
         INITIALISED, ImuMode, SOFT_RESET, UPLOAD_CHUNK, register,
     },
-    convert::{milli_g, millidegrees_per_second},
+    convert::{milli_g, millicelsius, millidegrees_per_second},
 };
 
 /// How long it takes to come back from a soft reset.
@@ -109,6 +109,21 @@ impl Imu {
         let [x, y, z] =
             array::from_fn(|axis| millidegrees_per_second(raw[axis] - self.gyroscope_offset[axis]));
         Ok(Rotation { x, y, z })
+    }
+
+    /// The sensor's temperature: the board's, near enough, a little above
+    /// the room's while the Cardputer runs. It's measured every 1.28 s.
+    ///
+    /// # Errors
+    ///
+    /// If the sensor can't be read, or has no reading.
+    pub async fn temperature(&mut self) -> Result<Millicelsius, Error> {
+        let mut data = [0; 2];
+        self.device
+            .write_read(self.address, &[register::TEMPERATURE], &mut data)
+            .await
+            .map_err(|_| Error::Imu)?;
+        millicelsius(i16::from_le_bytes(data)).ok_or(Error::Imu)
     }
 
     /// Measures the gyroscope's offset (what it reads at rest), and takes it

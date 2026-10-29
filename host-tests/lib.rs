@@ -2,8 +2,8 @@
 //! so the tests in them run: the battery estimate and the other unit
 //! conversions, the RGB LED's and the IR codes' pulses, the framebuffer's
 //! change tracking, the keyboard's layout and its controller's
-//! reading (against a fake TCA8418), and the motion sensor's configuration
-//! upload.
+//! reading (against a fake TCA8418), the motion sensor's configuration
+//! upload, and the speaker's tones.
 //!
 //! The modules sit at the root, as in the crate, so their `crate::` paths
 //! resolve the same here.
@@ -29,6 +29,8 @@ mod panel;
 mod pulses;
 #[path = "../src/tca8418.rs"]
 mod tca8418;
+#[path = "../src/tone.rs"]
+mod tone;
 #[path = "../src/units.rs"]
 mod units;
 

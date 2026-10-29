@@ -3,7 +3,7 @@
 //! [cardputer-adv-keyboard](https://crates.io/crates/cardputer-adv-keyboard)
 //! (MIT OR Apache-2.0).
 
-use crate::keys::{Arrow, KeyInput, Modifier};
+use crate::keys::{Arrow, KeyEvent, KeyInput, Modifier};
 
 /// What a key is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,34 +82,52 @@ const fn typed(key: Key, shift: bool, fn_held: bool) -> KeyInput {
 pub struct Keymap {
     /// The keys held: a bit for each key number.
     held: u128,
+    /// Of those, the keys pressed with Shift held, and with Fn: what they
+    /// typed, for their releases to say the same.
+    shifted: u128,
+    fn_layer: u128,
 }
 
 impl Keymap {
     /// No keys held.
     #[must_use]
     pub const fn new() -> Self {
-        Self { held: 0 }
+        Self {
+            held: 0,
+            shifted: 0,
+            fn_layer: 0,
+        }
     }
 
-    /// What a key event (a `KEY_EVENT_A` byte: bit 7 set for a press, then
-    /// the key number) types: `None` for a release, or a number that isn't
-    /// a key. A modifier's own press types [`KeyInput::Modifier`].
-    pub fn input(&mut self, event: u8) -> Option<KeyInput> {
+    /// The key event a `KEY_EVENT_A` byte (bit 7 set for a press, then the
+    /// key number) is, with what the key types: as Shift and Fn are now for
+    /// a press, and as they were at its press for a release. `None` for a
+    /// number that isn't a key. A modifier's own press types
+    /// [`KeyInput::Modifier`].
+    pub fn event(&mut self, event: u8) -> Option<KeyEvent> {
         let number = event & 0x7F;
         let key = key(number)?;
-        let pressed = event & 0x80 != 0;
-        if pressed {
-            self.held |= 1 << number;
+        let bit = 1 << number;
+        if event & 0x80 != 0 {
+            self.held |= bit;
+            let shift = self.holds(Key::Modifier(Modifier::Shift));
+            let fn_held = self.holds(Key::Modifier(Modifier::Fn));
+            self.shifted = if shift {
+                self.shifted | bit
+            } else {
+                self.shifted & !bit
+            };
+            self.fn_layer = if fn_held {
+                self.fn_layer | bit
+            } else {
+                self.fn_layer & !bit
+            };
+            Some(KeyEvent::Pressed(typed(key, shift, fn_held)))
         } else {
-            self.held &= !(1 << number);
+            self.held &= !bit;
+            let typed = typed(key, self.shifted & bit != 0, self.fn_layer & bit != 0);
+            Some(KeyEvent::Released(typed))
         }
-        pressed.then(|| {
-            typed(
-                key,
-                self.holds(Key::Modifier(Modifier::Shift)),
-                self.holds(Key::Modifier(Modifier::Fn)),
-            )
-        })
     }
 
     /// Whether a key that types `input`, with or without Shift or Fn, is
@@ -143,6 +161,14 @@ mod tests {
         number | 0x80
     }
 
+    /// What `event` types, if it's a press.
+    fn typed(keymap: &mut Keymap, event: u8) -> Option<KeyInput> {
+        keymap
+            .event(event)
+            .filter(|event| event.is_press())
+            .map(KeyEvent::input)
+    }
+
     /// The key numbers of the keys used here: matrix row × 10 + column + 1.
     const FN: u8 = 3;
     const SHIFT: u8 = 7;
@@ -152,67 +178,100 @@ mod tests {
     #[test]
     fn a_key_types_its_character_and_shift_the_upper_one() {
         let mut keymap = Keymap::default();
-        assert_eq!(keymap.input(press(A)), Some(KeyInput::Char('a')));
-        assert_eq!(keymap.input(A), None);
+        assert_eq!(typed(&mut keymap, press(A)), Some(KeyInput::Char('a')));
+        assert_eq!(typed(&mut keymap, A), None);
         assert_eq!(
-            keymap.input(press(SHIFT)),
+            typed(&mut keymap, press(SHIFT)),
             Some(KeyInput::Modifier(Modifier::Shift))
         );
-        assert_eq!(keymap.input(press(A)), Some(KeyInput::Char('A')));
-        assert_eq!(keymap.input(SHIFT), None);
-        assert_eq!(keymap.input(press(A)), Some(KeyInput::Char('a')));
+        assert_eq!(typed(&mut keymap, press(A)), Some(KeyInput::Char('A')));
+        assert_eq!(typed(&mut keymap, SHIFT), None);
+        assert_eq!(typed(&mut keymap, press(A)), Some(KeyInput::Char('a')));
     }
 
     #[test]
     fn fn_gives_the_arrows_over_shift() {
         let mut keymap = Keymap::default();
-        keymap.input(press(FN));
-        keymap.input(press(SHIFT));
+        typed(&mut keymap, press(FN));
+        typed(&mut keymap, press(SHIFT));
         assert_eq!(
-            keymap.input(press(SEMICOLON)),
+            typed(&mut keymap, press(SEMICOLON)),
             Some(KeyInput::Arrow(Arrow::Up))
         );
         // Nothing on the Fn layer: Shift still applies.
-        assert_eq!(keymap.input(press(A)), Some(KeyInput::Char('A')));
+        assert_eq!(typed(&mut keymap, press(A)), Some(KeyInput::Char('A')));
     }
 
     #[test]
     fn a_key_is_held_from_its_press_to_its_release() {
         let mut keymap = Keymap::default();
         assert!(!keymap.is_held(KeyInput::Char('a')));
-        keymap.input(press(A));
+        typed(&mut keymap, press(A));
         assert!(keymap.is_held(KeyInput::Char('a')));
         assert!(keymap.is_held(KeyInput::Char('A')), "the same key");
         assert!(!keymap.is_held(KeyInput::Char('s')));
-        keymap.input(A);
+        typed(&mut keymap, A);
         assert!(!keymap.is_held(KeyInput::Char('a')));
     }
 
     #[test]
     fn modifiers_and_fn_layer_keys_are_held_too() {
         let mut keymap = Keymap::default();
-        keymap.input(press(FN));
-        keymap.input(press(SEMICOLON));
+        typed(&mut keymap, press(FN));
+        typed(&mut keymap, press(SEMICOLON));
         assert!(keymap.is_held(KeyInput::Modifier(Modifier::Fn)));
         assert!(keymap.is_held(KeyInput::Arrow(Arrow::Up)));
         assert!(keymap.is_held(KeyInput::Char(';')), "the same key");
         assert!(!keymap.is_held(KeyInput::Modifier(Modifier::Shift)));
-        keymap.input(FN);
+        typed(&mut keymap, FN);
         // The key is still down, whatever it would type now.
         assert!(keymap.is_held(KeyInput::Arrow(Arrow::Up)));
     }
 
     #[test]
+    fn a_release_types_what_its_press_did() {
+        let mut keymap = Keymap::default();
+        assert_eq!(
+            keymap.event(press(A)),
+            Some(KeyEvent::Pressed(KeyInput::Char('a')))
+        );
+        keymap.event(press(SHIFT));
+        assert_eq!(
+            keymap.event(A),
+            Some(KeyEvent::Released(KeyInput::Char('a'))),
+            "pressed before Shift"
+        );
+        keymap.event(press(A));
+        keymap.event(SHIFT);
+        assert_eq!(
+            keymap.event(A),
+            Some(KeyEvent::Released(KeyInput::Char('A'))),
+            "pressed with Shift"
+        );
+        keymap.event(press(FN));
+        keymap.event(press(SEMICOLON));
+        keymap.event(FN);
+        assert_eq!(
+            keymap.event(SEMICOLON),
+            Some(KeyEvent::Released(KeyInput::Arrow(Arrow::Up)))
+        );
+        assert_eq!(
+            keymap.event(SHIFT),
+            Some(KeyEvent::Released(KeyInput::Modifier(Modifier::Shift)))
+        );
+    }
+
+    #[test]
     fn numbers_off_the_keyboard_type_nothing() {
         let mut keymap = Keymap::default();
-        assert_eq!(keymap.input(0), None);
-        assert_eq!(keymap.input(press(0)), None);
-        assert_eq!(keymap.input(press(81)), None);
-        assert_eq!(keymap.input(press(97)), None);
+        assert_eq!(typed(&mut keymap, 0), None);
+        assert_eq!(typed(&mut keymap, press(0)), None);
+        assert_eq!(typed(&mut keymap, press(81)), None);
+        assert_eq!(typed(&mut keymap, press(97)), None);
         // Row 7 of the matrix is past the layout's 14 columns, and it has
         // no column 8.
-        assert_eq!(keymap.input(press(71)), None);
-        assert_eq!(keymap.input(press(9)), None);
+        assert_eq!(typed(&mut keymap, press(71)), None);
+        assert_eq!(typed(&mut keymap, press(9)), None);
     }
 
     #[test]

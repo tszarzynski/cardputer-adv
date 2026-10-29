@@ -3,7 +3,7 @@
 
 use std::{cell::RefCell, collections::VecDeque, convert::Infallible, rc::Rc};
 
-use cardputer_adv_host_tests::Keymap;
+use cardputer_adv_host_tests::{Keymap, keys::KeyEvent};
 use cardputer_adv_keyboard::Keyboard;
 use embedded_hal::i2c::{ErrorType, I2c, Operation};
 
@@ -71,7 +71,9 @@ fn typed(events: &[u8]) -> (Vec<String>, Vec<String>) {
     let mut keymap = Keymap::default();
     let ours = events
         .iter()
-        .filter_map(|&event| keymap.input(event))
+        .filter_map(|&event| keymap.event(event))
+        .filter(|event| event.is_press())
+        .map(KeyEvent::input)
         .map(|input| format!("{input:?}"))
         .collect();
     (theirs, ours)

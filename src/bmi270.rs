@@ -17,6 +17,8 @@ pub mod register {
     /// The gyroscope's x, y and z, each 16-bit little-endian.
     pub const GYR_DATA: u8 = 0x12;
     pub const INTERNAL_STATUS: u8 = 0x21;
+    /// The temperature, 16-bit little-endian.
+    pub const TEMPERATURE: u8 = 0x22;
     pub const ACC_CONF: u8 = 0x40;
     pub const ACC_RANGE: u8 = 0x41;
     pub const GYR_CONF: u8 = 0x42;

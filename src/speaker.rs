@@ -14,10 +14,7 @@ use esp_hal::{
     time::Rate,
 };
 
-use crate::Error;
-
-/// The speaker's sample rate.
-pub const SAMPLE_RATE: u32 = 44_100;
+use crate::{Error, SAMPLE_RATE};
 
 /// The DMA buffer: 4096 bytes is 1024 stereo frames, 23 ms, in 8 chunks.
 /// Samples are pushed at most that far ahead of being heard.

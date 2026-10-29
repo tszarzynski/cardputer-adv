@@ -106,12 +106,13 @@ mod remote;
 mod sd_card;
 mod speaker;
 mod tca8418;
+mod tone;
 mod units;
 
 pub use audio::{Audio, AudioPins, audio};
 pub use battery::{Battery, BatteryPins, battery};
 pub use bmi270::ImuMode;
-pub use button::{Button, button};
+pub use button::{Button, Click, button};
 pub use codec::{Codec, codec};
 pub use convert::battery_percent;
 pub use display::{Backlight, Display, DisplayPins, display};
@@ -135,5 +136,6 @@ pub use pulses::{ExtendedNecCode, NecCode, Pulse};
 pub use remote::{RMT_FREQUENCY, rmt};
 #[cfg(feature = "sd-card")]
 pub use sd_card::{SdCard, SdCardPins, sd_card};
-pub use speaker::{SAMPLE_RATE, Speaker, SpeakerPins, speaker};
-pub use units::{Acceleration, Decibels, Millivolts, Percent, Rotation};
+pub use speaker::{Speaker, SpeakerPins, speaker};
+pub use tone::{SAMPLE_RATE, Tone, Waveform};
+pub use units::{Acceleration, Decibels, Hertz, Millicelsius, Millivolts, Percent, Rotation};

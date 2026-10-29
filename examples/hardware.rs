@@ -4,18 +4,20 @@
 //! 1. Lie it flat and still while it starts: the gyroscope calibrates.
 //! 2. Press G0 three times: each press sends an NEC code over IR (a phone
 //!    camera shows the IR LED), and moves the motion sensor on to its next
-//!    power mode (step 4's line names it; low-power reads noisier).
+//!    power mode (step 4's line names it; low-power reads noisier). The
+//!    speaker beeps what the press was: a click high, a double click
+//!    higher, a long press low; the log names it too.
 //! 3. Clap near it: the microphone.
 //! 4. Tilt it on its side: the motion sensor. The gyroscope's line shows
 //!    how fast it's turning, so it reads about 0 whenever it's still.
 //! 5. Watch the RGB LED cycle red, green, blue and off. Nothing can see it,
 //!    so this line stays white.
 //! 6. Type a capital (Shift) and an arrow (Fn + `;` `,` `.` `/`): the
-//!    keyboard. Its line shows the last key typed, and the log whether
-//!    Shift and Fn are held after each.
+//!    keyboard. Its line shows the last key typed; the log has each key
+//!    going down and coming up, and whether Shift and Fn are held.
 //!
-//! The microSD card's size shows too, if there's one, and everything is
-//! logged over USB as well.
+//! The motion sensor's temperature and the microSD card's size (if there's
+//! one) show too, and everything is logged over USB as well.
 //!
 //! `just hardware`, or `cargo run --release --example hardware --features sd-card`
 
@@ -27,16 +29,18 @@
 )]
 
 use core::{
+    cell::Cell,
     fmt::{self, Write as _},
     str,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    time,
 };
 
 use cardputer_adv::{
-    Acceleration, AudioPins, Button, Decibels, Display, Imu, ImuMode, IrTransmitter, Keyboard,
-    NecCode, Pulse, RgbLed, Rotation,
+    Acceleration, AudioPins, Button, Click, Decibels, Display, Hertz, Imu, ImuMode, IrTransmitter,
+    Keyboard, NecCode, Percent, Pulse, RgbLed, Rotation, Tone,
     embedded_sdmmc::BlockDevice,
-    keys::{KeyInput, Modifier},
+    keys::{KeyEvent, KeyInput, Modifier},
 };
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -65,6 +69,8 @@ static HEARD: Signal<CriticalSectionRawMutex, Heard> = Signal::new();
 
 /// G0 presses so far.
 static PRESSES: AtomicU32 = AtomicU32::new(0);
+/// A beep for the audio task to play.
+static BEEP: Signal<CriticalSectionRawMutex, Tone> = Signal::new();
 
 /// The last key typed, for the main task to show.
 static TYPED: Signal<CriticalSectionRawMutex, KeyInput> = Signal::new();
@@ -162,9 +168,17 @@ async fn colours(mut led: RgbLed) {
 #[embassy_executor::task]
 async fn remote(mut button: Button, mut ir: IrTransmitter) {
     loop {
-        button.wait_for_press().await;
+        let click = button.wait_for_click().await;
+        let pitch = match click {
+            Click::Double => 1320,
+            Click::Long => 440,
+            _ => 880,
+        };
+        BEEP.signal(
+            Tone::new(Hertz(pitch), time::Duration::from_millis(80)).with_level(Percent::new(25)),
+        );
         let press = PRESSES.fetch_add(1, Ordering::Relaxed) + 1;
-        info!("G0: press {press}, sending NEC 0x00/0x45");
+        info!("G0: {click:?} (press {press}), sending NEC 0x00/0x45");
         let code = NecCode {
             address: 0x00,
             command: 0x45,
@@ -189,10 +203,15 @@ async fn remote(mut button: Button, mut ir: IrTransmitter) {
 #[embassy_executor::task]
 async fn typing(mut keyboard: Keyboard) {
     loop {
-        match keyboard.wait_for_inputs().await {
-            Ok(inputs) => {
-                for input in inputs {
-                    info!("key: {input:?}");
+        match keyboard.wait_for_events().await {
+            Ok(events) => {
+                for event in events {
+                    let input = event.input();
+                    if let KeyEvent::Released(_) = event {
+                        info!("key up: {input}");
+                        continue;
+                    }
+                    info!("key: {input:?} ({input}, as text {:?})", input.char());
                     match input {
                         KeyInput::Char(c) if c.is_ascii_uppercase() => {
                             SHIFTED.store(true, Ordering::Relaxed);
@@ -214,19 +233,38 @@ async fn typing(mut keyboard: Keyboard) {
     }
 }
 
-/// Plays silence (the microphone runs on the speaker's clocks) and measures
-/// what the microphone hears, each half second.
+/// Plays silence, and the beeps G0 asks for (the microphone runs on the
+/// speaker's clocks), and measures what the microphone hears, each half
+/// second.
 #[embassy_executor::task]
 async fn listen(pins: AudioPins) {
     let mut audio = cardputer_adv::audio(pins).expect("audio");
     let (mut sum, mut squares, mut peak, mut count) = (0i64, 0u64, 0u16, 0u32);
+    // Samples to leave unmeasured: the microphone hears the beeps, which
+    // mustn't count as a clap. Until a little after each ends.
+    let hush = Cell::new(0);
+    let mut beep = Tone::new(Hertz(0), time::Duration::ZERO);
+    let fill = |samples: &mut [i16]| {
+        if let Some(tone) = BEEP.try_take() {
+            beep = tone;
+        }
+        if !beep.is_done() {
+            hush.set(cardputer_adv::SAMPLE_RATE / 5);
+        }
+        beep.fill(samples);
+    };
     let take = |samples: &[i16]| {
+        let len = u32::try_from(samples.len()).unwrap_or(u32::MAX);
+        if hush.get() > 0 {
+            hush.set(hush.get().saturating_sub(len));
+            return;
+        }
         for &sample in samples {
             sum += i64::from(sample);
             squares += u64::from(sample.unsigned_abs()).pow(2);
             peak = peak.max(sample.unsigned_abs());
         }
-        count += u32::try_from(samples.len()).unwrap_or(u32::MAX);
+        count += len;
         if count >= cardputer_adv::SAMPLE_RATE / 2 {
             let mean = sum / i64::from(count);
             let level = (squares / u64::from(count))
@@ -236,7 +274,7 @@ async fn listen(pins: AudioPins) {
             (sum, squares, peak, count) = (0, 0, 0, 0);
         }
     };
-    let Err(error) = audio.run(|samples| samples.fill(0), take).await;
+    let Err(error) = audio.run(fill, take).await;
     warn!("audio stopped: {error}");
 }
 
@@ -289,6 +327,15 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
                 screen.show(6, false, format_args!("   turning {rx} {ry} {rz} deg/s"));
             }
             (Err(error), _) | (_, Err(error)) => warn!("motion: {error}"),
+        }
+        match imu.temperature().await {
+            Ok(temperature) => {
+                info!("temperature: {temperature}");
+                let tenths = temperature.0 / 100;
+                let (degrees, tenth) = (tenths / 10, (tenths % 10).abs());
+                screen.show(7, false, format_args!("   temperature {degrees}.{tenth} C"));
+            }
+            Err(error) => warn!("temperature: {error}"),
         }
         typed = TYPED.try_take().or(typed);
         let both_layers = SHIFTED.load(Ordering::Relaxed) && FN_LAYER.load(Ordering::Relaxed);

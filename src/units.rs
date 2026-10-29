@@ -61,6 +61,31 @@ impl fmt::Display for Decibels {
     }
 }
 
+/// A frequency, in hertz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Hertz(pub u32);
+
+impl fmt::Display for Hertz {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} Hz", self.0)
+    }
+}
+
+/// A temperature, in thousandths of a degree Celsius.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Millicelsius(pub i32);
+
+/// To a tenth of a degree, rounded toward zero: `23.5 °C`.
+impl fmt::Display for Millicelsius {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sign = if self.0 < 0 { "-" } else { "" };
+        let tenths = self.0.unsigned_abs() / 100;
+        write!(f, "{sign}{}.{} °C", tenths / 10, tenths % 10)
+    }
+}
+
 /// An acceleration, in milli-g, along the motion sensor's axes. At rest
 /// it's about 1000 mg in all: gravity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -105,5 +130,9 @@ mod tests {
         assert_eq!(Percent::new(15).to_string(), "15%");
         assert_eq!(Millivolts(3880).to_string(), "3880 mV");
         assert_eq!(Decibels(24).to_string(), "24 dB");
+        assert_eq!(Hertz(440).to_string(), "440 Hz");
+        assert_eq!(Millicelsius(23_456).to_string(), "23.4 °C");
+        assert_eq!(Millicelsius(-1_250).to_string(), "-1.2 °C");
+        assert_eq!(Millicelsius(-50).to_string(), "-0.0 °C");
     }
 }

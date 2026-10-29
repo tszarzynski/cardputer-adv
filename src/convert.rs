@@ -1,6 +1,6 @@
 //! Conversions between the parts' raw readings and settings, and units.
 
-use crate::units::{Decibels, Millivolts, Percent};
+use crate::units::{Decibels, Millicelsius, Millivolts, Percent};
 
 /// The charge left for the battery at `voltage`: M5Stack's estimate for
 /// the Cardputer (M5Unified's `Power_Class::getBatteryLevel`), 3.30 V
@@ -35,6 +35,16 @@ pub const fn millidegrees_per_second(raw: i32) -> i32 {
     raw * 15_625 / 256
 }
 
+/// A BMI270 temperature reading (0 at 23 °C, 512 counts a degree), or
+/// `None` for 0x8000: no reading, with both sensors off.
+pub const fn millicelsius(raw: i16) -> Option<Millicelsius> {
+    if raw == i16::MIN {
+        None
+    } else {
+        Some(Millicelsius(23_000 + raw as i32 * 1000 / 512))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,6 +77,15 @@ mod tests {
         assert_eq!(step(24), 8);
         assert_eq!(step(30), 10);
         assert_eq!(step(255), 10);
+    }
+
+    #[test]
+    fn the_temperature_is_23_degrees_at_zero_and_512_counts_a_degree() {
+        assert_eq!(millicelsius(0), Some(Millicelsius(23_000)));
+        assert_eq!(millicelsius(512), Some(Millicelsius(24_000)));
+        assert_eq!(millicelsius(-256), Some(Millicelsius(22_500)));
+        assert_eq!(millicelsius(i16::MAX), Some(Millicelsius(86_998)));
+        assert_eq!(millicelsius(i16::MIN), None, "no reading");
     }
 
     #[test]

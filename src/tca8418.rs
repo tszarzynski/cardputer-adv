@@ -1,5 +1,5 @@
 //! The TCA8418 keyboard controller: setting it up, and reading its key
-//! events into what they type. It's generic over the I2C bus, so the host
+//! events into what they type, pressed and released. It's generic over the I2C bus, so the host
 //! tests can run it against a fake; [`Keyboard`] adds the interrupt line and
 //! the waiting.
 //!
@@ -9,7 +9,10 @@ use core::mem;
 
 use embedded_hal_async::i2c::I2c;
 
-use crate::{keymap::Keymap, keys::KeyInput};
+use crate::{
+    keymap::Keymap,
+    keys::{KeyEvent, KeyInput},
+};
 
 /// Its I2C address.
 const ADDRESS: u8 = 0x34;
@@ -32,8 +35,8 @@ const ALL_INTERRUPTS: u8 = 0x1F;
 /// `KP_GPIO1`–`3`: the keyboard's matrix, rows 0–6 and columns 0–7.
 const MATRIX: [u8; 3] = [0x7F, 0xFF, 0x00];
 
-/// The most key inputs one read returns (the FIFO holds 10 events).
-const MAX_INPUTS: usize = 10;
+/// The most key events one read returns (the FIFO holds 10).
+const MAX_EVENTS: usize = 10;
 
 /// Why the controller is being read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,15 +49,15 @@ pub enum Wake {
     Pending,
 }
 
-/// The TCA8418, and the key inputs read from it and not yet returned.
+/// The TCA8418, and the key events read from it and not yet returned.
 pub struct Tca8418<I> {
     i2c: I,
     /// Which keys are held.
     keymap: Keymap,
-    /// Inputs read and not yet returned, in order: the first `typed`.
+    /// Events read and not yet returned, in order: the first `count`.
     /// They're kept here so that a cancelled read loses none of them.
-    inputs: [Option<KeyInput>; MAX_INPUTS],
-    typed: usize,
+    events: [Option<KeyEvent>; MAX_EVENTS],
+    count: usize,
     /// Events arrived while the last batch was being read: read again
     /// without waiting.
     pending: bool,
@@ -68,8 +71,8 @@ impl<I: I2c> Tca8418<I> {
         Self {
             i2c,
             keymap: Keymap::new(),
-            inputs: [None; MAX_INPUTS],
-            typed: 0,
+            events: [None; MAX_EVENTS],
+            count: 0,
             pending: false,
             missed: 0,
         }
@@ -91,36 +94,35 @@ impl<I: I2c> Tca8418<I> {
         self.write(INT_STAT, ALL_INTERRUPTS).await
     }
 
-    /// The inputs read and not yet returned, if there are any.
-    pub fn take_inputs(&mut self) -> Option<impl Iterator<Item = KeyInput> + use<I>> {
-        if self.typed == 0 {
+    /// The events read and not yet returned, if there are any.
+    pub fn take_events(&mut self) -> Option<impl Iterator<Item = KeyEvent> + use<I>> {
+        if self.count == 0 {
             return None;
         }
-        self.typed = 0;
+        self.count = 0;
         Some(
-            mem::replace(&mut self.inputs, [None; MAX_INPUTS])
+            mem::replace(&mut self.events, [None; MAX_EVENTS])
                 .into_iter()
                 .flatten(),
         )
     }
 
     /// Reads up to a FIFO's worth of events, woken by `wake`, and returns
-    /// how many there were. What they type waits in
-    /// [`take_inputs`](Self::take_inputs).
+    /// how many there were. They wait in [`take_events`](Self::take_events).
     ///
-    /// Cancelling it, or a failure, loses no input already read. A cancel in
+    /// Cancelling it, or a failure, loses no event already read. A cancel in
     /// the middle of the I2C transfer that takes an event from the FIFO can
     /// lose that one.
     pub async fn read_events(&mut self, wake: Wake) -> Result<u8, I::Error> {
         // At most a FIFO's worth: any more stay in it, and keep the line
         // low, for next time.
         let count = self.event_count().await?;
-        for _ in 0..usize::from(count).min(MAX_INPUTS) {
+        for _ in 0..usize::from(count).min(MAX_EVENTS) {
             let event = self.read(KEY_EVENT_A).await?;
-            // Releases (and numbers that aren't keys) type nothing.
-            if let Some(input) = self.keymap.input(event) {
-                self.inputs[self.typed] = Some(input);
-                self.typed += 1;
+            // Numbers that aren't keys are dropped.
+            if let Some(event) = self.keymap.event(event) {
+                self.events[self.count] = Some(event);
+                self.count += 1;
             }
         }
         // Clear every flag (key events, overflow, …) so no source keeps the
@@ -274,8 +276,15 @@ mod tests {
     const A: u8 = 13;
     const D: u8 = 23;
 
+    /// What the presses taken type.
     fn taken(controller: &mut Tca8418<Fake>) -> Vec<KeyInput> {
-        controller.take_inputs().into_iter().flatten().collect()
+        controller
+            .take_events()
+            .into_iter()
+            .flatten()
+            .filter(|event| event.is_press())
+            .map(KeyEvent::input)
+            .collect()
     }
 
     #[test]
@@ -285,25 +294,33 @@ mod tests {
         assert!(controller.i2c.fifo.is_empty());
         assert_eq!(controller.i2c.registers[usize::from(CFG)], KE_IEN);
         assert_eq!(controller.i2c.registers[0x1D..0x20], MATRIX);
-        assert_eq!(controller.take_inputs().map(Iterator::count), None);
+        assert_eq!(controller.take_events().map(Iterator::count), None);
     }
 
     #[test]
-    fn presses_type_and_releases_dont() {
+    fn presses_and_releases_come_in_order() {
         let events = [press(A), A, press(SHIFT), press(A), A, SHIFT];
         let mut controller = Tca8418::new(Fake::with_events(&events));
         assert_eq!(block_on(controller.read_events(Wake::Interrupt)), Ok(6));
+        let shift = KeyInput::Modifier(Modifier::Shift);
         assert_eq!(
-            taken(&mut controller),
+            controller
+                .take_events()
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
             [
-                KeyInput::Char('a'),
-                KeyInput::Modifier(Modifier::Shift),
-                KeyInput::Char('A'),
+                KeyEvent::Pressed(KeyInput::Char('a')),
+                KeyEvent::Released(KeyInput::Char('a')),
+                KeyEvent::Pressed(shift),
+                KeyEvent::Pressed(KeyInput::Char('A')),
+                KeyEvent::Released(KeyInput::Char('A')),
+                KeyEvent::Released(shift),
             ]
         );
         assert!(!controller.is_pending());
         // Each taken once.
-        assert_eq!(controller.take_inputs().map(Iterator::count), None);
+        assert_eq!(controller.take_events().map(Iterator::count), None);
     }
 
     #[test]
@@ -311,10 +328,10 @@ mod tests {
         let events = [press(A), A].repeat(6);
         let mut controller = Tca8418::new(Fake::with_events(&events));
         assert_eq!(block_on(controller.read_events(Wake::Interrupt)), Ok(10));
-        assert_eq!(taken(&mut controller).len(), 5);
+        assert_eq!(controller.take_events().map(Iterator::count), Some(10));
         assert!(controller.is_pending());
         assert_eq!(block_on(controller.read_events(Wake::Pending)), Ok(2));
-        assert_eq!(taken(&mut controller).len(), 1);
+        assert_eq!(controller.take_events().map(Iterator::count), Some(2));
         assert!(!controller.is_pending());
     }
 
