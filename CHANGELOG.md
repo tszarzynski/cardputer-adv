@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- `imu`'s docs give the time it takes as measured on the device, about 230 ms (they said its upload took about 50 ms).
+
 ## [0.4.0] - 2026-10-29
 
 - Breaking: the I2C bus is async. `I2cBus` is an embassy-sync async mutex and `I2cDevice` embassy-embedded-hal's async device, so a task waiting for the bus lets others run, and no transfer holds interrupts off (they held a critical section, up to 3 ms at a time while the motion sensor started).

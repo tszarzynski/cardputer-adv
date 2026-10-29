@@ -219,8 +219,10 @@ impl Imu {
 }
 
 /// Starts the BMI270 on the shared bus: finds it at either of its addresses,
-/// uploads its configuration (8 kB, about 50 ms) and turns the accelerometer
-/// on.
+/// uploads its configuration and turns the accelerometer on.
+///
+/// It returns after about 230 ms, most of it the 8 kB configuration going
+/// over the bus at 400 kHz; other tasks share the bus meanwhile.
 ///
 /// # Errors
 ///
