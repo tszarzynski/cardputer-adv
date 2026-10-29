@@ -36,6 +36,9 @@ const MIC1: u8 = 0x10;
 /// The ES8311 codec, its DAC path to the amplifier on: what
 /// [`codec`] returns. Holding one means the codec has been set up,
 /// so its level and output can be changed.
+///
+/// Its methods write one register after another. One that fails, or is
+/// cancelled, partway leaves the codec partly set: call it again to finish.
 pub struct Codec {
     device: I2cDevice,
     /// The microphone preamp's gain, in 3 dB steps (0–10).
@@ -114,9 +117,10 @@ impl Codec {
     ///
     /// If the codec doesn't answer.
     pub async fn set_microphone_gain(&mut self, gain: Decibels) -> Result<(), Error> {
-        self.microphone_gain = microphone_gain_step(gain);
-        self.write(&[[ES8311_ADC_PGA, MIC1 | self.microphone_gain]])
-            .await
+        let step = microphone_gain_step(gain);
+        self.write(&[[ES8311_ADC_PGA, MIC1 | step]]).await?;
+        self.microphone_gain = step;
+        Ok(())
     }
 
     /// Writes each `[register, value]` in turn.

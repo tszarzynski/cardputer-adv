@@ -8,6 +8,7 @@
 /// nothing on its Fn layer types as it would without Fn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum KeyInput {
     /// A printable character (Shift gives the upper one on the key).
     Char(char),
@@ -31,6 +32,7 @@ pub enum KeyInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[expect(missing_docs, reason = "the directions are their names")]
+#[non_exhaustive]
 pub enum Arrow {
     Up,
     Down,
@@ -42,6 +44,7 @@ pub enum Arrow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[expect(missing_docs, reason = "the keys are their labels")]
+#[non_exhaustive]
 pub enum Modifier {
     Shift,
     Fn,

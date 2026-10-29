@@ -110,9 +110,6 @@ mod units;
 pub use audio::{Audio, AudioPins, audio};
 pub use battery::{Battery, BatteryPins, battery};
 pub use button::{Button, button};
-/// The keyboard driver and its key types ([cardputer-adv-keyboard]).
-///
-/// [cardputer-adv-keyboard]: https://crates.io/crates/cardputer-adv-keyboard
 pub use codec::{Codec, codec};
 pub use convert::battery_percent;
 pub use display::{Backlight, Display, DisplayPins, display};

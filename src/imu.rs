@@ -17,8 +17,9 @@ use crate::{
 
 /// How long it takes to come back from a soft reset.
 const RESET_TIME: Duration = Duration::from_millis(2);
-/// The wait after switching advanced power save, and before uploading.
-const POWER_SAVE_SWITCH: Duration = Duration::from_micros(450);
+/// The wait after each register write: with advanced power save on, the
+/// BMI270 takes one write per 450 µs.
+const WRITE_GAP: Duration = Duration::from_micros(450);
 /// How long it takes to start on the configuration (20 ms at most).
 const INITIALISATION_TIME: Duration = Duration::from_millis(20);
 
@@ -123,7 +124,6 @@ impl Imu {
         self.set_power_save(false).await?;
         let control = self.read(register::INIT_CTRL).await?;
         self.write(register::INIT_CTRL, control & !1).await?;
-        Timer::after(POWER_SAVE_SWITCH).await;
         let mut buffer = [0; UPLOAD_CHUNK + 1];
         buffer[0] = register::INIT_DATA;
         for ([address_low, address_high], chunk) in bmi270::upload_chunks(&BMI270_CONFIG_FILE) {
@@ -151,9 +151,7 @@ impl Imu {
         } else {
             config & !ADVANCED_POWER_SAVE
         };
-        self.write(register::PWR_CONF, config).await?;
-        Timer::after(POWER_SAVE_SWITCH).await;
-        Ok(())
+        self.write(register::PWR_CONF, config).await
     }
 
     /// A reading's three axes, in the sensor's counts, from `register` on.
@@ -175,11 +173,15 @@ impl Imu {
         Ok(value[0])
     }
 
+    /// Writes a register, then waits [`WRITE_GAP`] for the next write.
     async fn write(&mut self, register: u8, value: u8) -> Result<(), Error> {
-        self.write_all(&[register, value]).await
+        self.write_all(&[register, value]).await?;
+        Timer::after(WRITE_GAP).await;
+        Ok(())
     }
 
-    /// Writes `bytes`: a register, and what goes in it and those after.
+    /// Writes `bytes`: a register, and what goes in it and those after. For
+    /// the configuration's upload, which runs with advanced power save off.
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.device
             .write(self.address, bytes)

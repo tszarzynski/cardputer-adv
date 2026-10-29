@@ -84,17 +84,19 @@ mod tests {
 
     #[test]
     fn the_configuration_goes_in_word_addressed_chunks() {
-        let config = [0u8; 8192];
-        let mut chunks = upload_chunks(&config).map(|(address, chunk)| (address, chunk.len()));
-        assert_eq!(chunks.next(), Some(([0, 0], UPLOAD_CHUNK)));
+        // Each byte different from its neighbours, so a chunk from the
+        // wrong place shows.
+        let config: [u8; 8192] = core::array::from_fn(|index| index.to_le_bytes()[0]);
+        let mut chunks = upload_chunks(&config);
+        assert_eq!(chunks.next(), Some(([0, 0], &config[..UPLOAD_CHUNK])));
         // 63 words in: 0x3F, low nibble then the rest.
-        assert_eq!(chunks.next(), Some(([0x0F, 0x03], UPLOAD_CHUNK)));
-        assert_eq!(chunks.count(), 64);
-        // 4095 words in, the last two bytes.
         assert_eq!(
-            upload_chunks(&config).last(),
-            Some(([0x0F, 0xFF], &config[..2]))
+            chunks.next(),
+            Some(([0x0F, 0x03], &config[UPLOAD_CHUNK..2 * UPLOAD_CHUNK]))
         );
+        assert_eq!(upload_chunks(&config).count(), 66);
+        // 4095 words in, the last two bytes.
+        assert_eq!(chunks.last(), Some(([0x0F, 0xFF], &config[8190..])));
     }
 
     #[test]

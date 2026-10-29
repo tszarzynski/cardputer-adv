@@ -60,9 +60,11 @@ pub struct Keyboard {
     interrupt: Input<'static>,
     /// Which of Shift and Fn are held.
     keymap: Keymap,
-    /// Inputs read from the TCA8418 and not yet returned, in order. They're
-    /// kept here so that a cancelled wait loses none of them.
+    /// Inputs read from the TCA8418 and not yet returned, in order: the
+    /// first `typed`. They're kept here so that a cancelled wait loses none
+    /// of them.
     inputs: [Option<KeyInput>; MAX_INPUTS],
+    typed: usize,
     /// Events arrived while the last batch was being read: read again
     /// without waiting.
     pending: bool,
@@ -94,7 +96,15 @@ impl Keyboard {
     /// If the TCA8418 can't be read over I2C.
     pub async fn wait_for_inputs(&mut self) -> Result<impl Iterator<Item = KeyInput>, Error> {
         loop {
-            let wake = if mem::take(&mut self.pending) || self.inputs[0].is_some() {
+            // Keys read by a call that was cancelled: return them before
+            // anything else, which could fail.
+            if self.typed > 0 {
+                self.typed = 0;
+                return Ok(mem::replace(&mut self.inputs, [None; MAX_INPUTS])
+                    .into_iter()
+                    .flatten());
+            }
+            let wake = if self.pending {
                 Wake::Pending
             } else {
                 match select(self.interrupt.wait_for_low(), Timer::after(FALLBACK_POLL)).await {
@@ -102,34 +112,28 @@ impl Keyboard {
                     Either::Second(()) => Wake::Fallback,
                 }
             };
+            // At most a FIFO's worth: any more stay in it, and keep the line
+            // low, for next time.
             let count = self.event_count().await?;
-            // As many as there's room for: the rest stay in the FIFO, and
-            // keep the line low, for next time.
-            let room = self.inputs.iter().filter(|input| input.is_none()).count();
-            for _ in 0..usize::from(count).min(room) {
+            for _ in 0..usize::from(count).min(MAX_INPUTS) {
                 let event = self.read(KEY_EVENT_A).await?;
                 // Releases (and numbers that aren't keys) type nothing.
-                if let Some(input) = self.keymap.input(event)
-                    && let Some(slot) = self.inputs.iter_mut().find(|slot| slot.is_none())
-                {
-                    *slot = Some(input);
+                if let Some(input) = self.keymap.input(event) {
+                    self.inputs[self.typed] = Some(input);
+                    self.typed += 1;
                 }
             }
             // Clear every flag (key events, overflow, …) so no source keeps
             // the line low, then catch an event that landed in between. The
             // keys are already read, so a failure here mustn't lose them:
-            // read again on the next call instead.
+            // read again on the next call instead. Until then, `pending`
+            // stays as it was, so a cancelled call doesn't lose it either.
             let cleared = self.write(INT_STAT, ALL_INTERRUPTS).await.is_ok();
             self.pending = !cleared || !self.event_count().await.is_ok_and(|count| count == 0);
 
             if count > 0 && wake == Wake::Fallback {
                 // Events without an interrupt: the line isn't working.
                 self.missed = self.missed.saturating_add(1);
-            }
-            if self.inputs[0].is_some() {
-                return Ok(mem::replace(&mut self.inputs, [None; MAX_INPUTS])
-                    .into_iter()
-                    .flatten());
             }
             if count == 0 && wake == Wake::Interrupt {
                 // Woken with nothing to read: back off, so a line stuck low
@@ -230,6 +234,7 @@ pub async fn keyboard_on(
         interrupt: Input::new(interrupt, InputConfig::default().with_pull(Pull::Up)),
         keymap: Keymap::default(),
         inputs: [None; MAX_INPUTS],
+        typed: 0,
         pending: false,
         missed: 0,
     };
