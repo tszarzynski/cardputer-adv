@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-29
+
 - Key auto-repeat: `Keyboard::set_repeat(Some(Repeat::default()))` repeats a held key in `wait_for_inputs`, after 400 ms and then 20 times a second (`Repeat::new` for other timings). Off by default.
 - `Imu::set_accelerometer_range` (`AccelerometerRange`, ±2 to ±16 g) and `Imu::set_gyroscope_range` (`GyroscopeRange`, ±125 to ±2000 °/s), with getters. Readings keep their units, and a gyroscope calibration carries over. Each waits 80 ms, so the next reading is in the new range: the sensor holds its last reading, in the old range, for up to 60 ms after a change.
 - The hardware example repeats held keys, steps the accelerometer's range on G0's double clicks and the gyroscope's on long presses, and counts both.
