@@ -37,3 +37,25 @@ doc:
 # what would go to crates.io, checked by building it (publishing itself is `cargo publish`)
 package:
     {{esp}} && cargo package
+
+# the public API against the last release on crates.io, by cargo-semver-checks (`cargo install cargo-semver-checks`): a breaking change needs a new major version (in 0.x, a minor one)
+# cargo-semver-checks can't build for Xtensa itself, so the rustdoc JSON is built here; the release is unpacked under target/, where it builds with this repo's toolchain and config.
+semver:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{esp}}
+    out=target/semver
+    release=$(curl -sf -A "cardputer-adv semver check" https://crates.io/api/v1/crates/cardputer-adv \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["crate"]["max_stable_version"])')
+    rm -rf "$out/release" && mkdir -p "$out/release"
+    curl -sfL "https://static.crates.io/crates/cardputer-adv/cardputer-adv-$release.crate" \
+        | tar -xz -C "$out/release" --strip-components 1
+    json() {
+        RUSTC_BOOTSTRAP=1 cargo rustdoc --manifest-path "$1/Cargo.toml" --lib --all-features --target-dir "$2" \
+            -- -Z unstable-options --output-format json
+    }
+    json "$out/release" "$out/release-target"
+    json . "$out/current-target"
+    cargo semver-checks \
+        --baseline-rustdoc "$out/release-target/xtensa-esp32s3-none-elf/doc/cardputer_adv.json" \
+        --current-rustdoc "$out/current-target/xtensa-esp32s3-none-elf/doc/cardputer_adv.json"

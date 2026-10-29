@@ -1,5 +1,6 @@
 # Tests the crate's pure logic on the host; lints, builds and packages the
-# crate for the ESP32-S3; and publishes its API
+# crate for the ESP32-S3, and checks its API against the last release for
+# breaking changes; and publishes its API
 # docs to GitHub Pages from main (docs.rs can't build for Xtensa).
 name: CI
 
@@ -34,7 +35,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
       - uses: taiki-e/install-action@v2
         with:
-          tool: just
+          tool: just,cargo-semver-checks
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -50,6 +51,8 @@ jobs:
         run: just doc
       - name: Package
         run: just package
+      - name: Semver, against the last release on crates.io
+        run: just semver
       - name: Prepare the docs for Pages
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
