@@ -9,6 +9,8 @@
 //!    how fast it's turning, so it reads about 0 whenever it's still.
 //! 5. Watch the RGB LED cycle red, green, blue and off. Nothing can see it,
 //!    so this line stays white.
+//! 6. Type a capital (Shift) and an arrow (Fn + `;` `,` `.` `/`): the
+//!    keyboard. Its line shows the last key typed.
 //!
 //! The microSD card's size shows too, if there's one, and everything is
 //! logged over USB as well.
@@ -25,12 +27,12 @@
 use core::{
     fmt::{self, Write as _},
     str,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use cardputer_adv::{
-    Acceleration, AudioPins, Button, Decibels, Display, Imu, IrTransmitter, NecCode, Pulse, RgbLed,
-    Rotation, embedded_sdmmc::BlockDevice,
+    Acceleration, AudioPins, Button, Decibels, Display, Imu, IrTransmitter, Keyboard, NecCode,
+    Pulse, RgbLed, Rotation, embedded_sdmmc::BlockDevice, keys::KeyInput,
 };
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -59,6 +61,12 @@ static HEARD: Signal<CriticalSectionRawMutex, Heard> = Signal::new();
 
 /// G0 presses so far.
 static PRESSES: AtomicU32 = AtomicU32::new(0);
+
+/// The last key typed, for the main task to show.
+static TYPED: Signal<CriticalSectionRawMutex, KeyInput> = Signal::new();
+/// Whether a capital (Shift) and an arrow (Fn) have been typed.
+static SHIFTED: AtomicBool = AtomicBool::new(false);
+static FN_LAYER: AtomicBool = AtomicBool::new(false);
 
 /// Half a second of the microphone.
 struct Heard {
@@ -91,6 +99,9 @@ async fn main(spawner: Spawner) -> ! {
     let mut imu = cardputer_adv::imu(bus).await.expect("motion sensor");
     imu.calibrate_gyroscope().await.expect("gyroscope");
     info!("{imu:?}");
+    let keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11)
+        .await
+        .expect("keyboard");
 
     let card = cardputer_adv::sd_card(cardputer_adv::sd_card_pins!(p)).expect("microSD bus");
     match card.num_blocks() {
@@ -126,6 +137,7 @@ async fn main(spawner: Spawner) -> ! {
     info!("{codec:?}");
     spawner.spawn(colours(led).expect("colours task"));
     spawner.spawn(remote(button, ir).expect("remote task"));
+    spawner.spawn(typing(keyboard).expect("keyboard task"));
     report(screen, imu).await
 }
 
@@ -167,6 +179,32 @@ async fn remote(mut button: Button, mut ir: IrTransmitter) {
     }
 }
 
+/// Logs each key typed, and passes it on to be shown.
+#[embassy_executor::task]
+async fn typing(mut keyboard: Keyboard) {
+    loop {
+        match keyboard.wait_for_inputs().await {
+            Ok(inputs) => {
+                for input in inputs {
+                    info!("key: {input:?}");
+                    match input {
+                        KeyInput::Char(c) if c.is_ascii_uppercase() => {
+                            SHIFTED.store(true, Ordering::Relaxed);
+                        }
+                        KeyInput::Arrow(_) => FN_LAYER.store(true, Ordering::Relaxed),
+                        _ => {}
+                    }
+                    TYPED.signal(input);
+                }
+            }
+            Err(error) => {
+                warn!("keyboard: {error}");
+                Timer::after(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
 /// Plays silence (the microphone runs on the speaker's clocks) and measures
 /// what the microphone hears, each half second.
 #[embassy_executor::task]
@@ -202,7 +240,7 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
         false,
         format_args!("5. By eye: LED red, green, blue, off"),
     );
-    let (mut loudest, mut tilted) = (0, false);
+    let (mut loudest, mut tilted, mut typed) = (0, false, None);
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
         let presses = PRESSES.load(Ordering::Relaxed);
@@ -234,7 +272,13 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
             }
             (Err(error), _) | (_, Err(error)) => warn!("motion: {error}"),
         }
-        if presses >= 3 && loudest >= CLAP_PEAK && tilted {
+        typed = TYPED.try_take().or(typed);
+        let both_layers = SHIFTED.load(Ordering::Relaxed) && FN_LAYER.load(Ordering::Relaxed);
+        match typed {
+            Some(key) => screen.show(10, both_layers, format_args!("6. Type A, Fn+;: {key:?}")),
+            None => screen.show(10, false, format_args!("6. Type A (Shift), Fn+; (up)")),
+        }
+        if presses >= 3 && loudest >= CLAP_PEAK && tilted && both_layers {
             screen.show(11, true, format_args!("All seen. Unplug when done."));
         }
         ticker.next().await;
