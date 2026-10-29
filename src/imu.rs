@@ -2,28 +2,25 @@
 
 use core::{array, fmt};
 
-use bmi2::{
-    Bmi2, I2cAddr, config,
-    interface::I2cInterface,
-    types::{
-        AccBwp, AccConf, AccRange, Burst, GyrBwp, GyrConf, GyrRange, GyrRangeVal, Odr, OisRange,
-        PerfMode, PwrCtrl,
-    },
-};
+use bmi2::config::BMI270_CONFIG_FILE;
 use embassy_time::{Duration, Timer};
-use embedded_hal_bus::i2c::CriticalSectionDevice;
-use esp_hal::delay::Delay;
+use embedded_hal_async::i2c::I2c as _;
 
 use crate::{
     Acceleration, Error, I2cBus, I2cDevice, Rotation,
+    bmi270::{
+        self, ACC_CONF_100HZ, ACC_RANGE_8G, ACCELEROMETER_ON, ADVANCED_POWER_SAVE, GYR_CONF_100HZ,
+        GYR_RANGE_2000, GYROSCOPE_ON, INITIALISED, SOFT_RESET, UPLOAD_CHUNK, register,
+    },
     convert::{milli_g, millidegrees_per_second},
 };
 
-/// The largest I2C write while uploading the BMI270's configuration.
-const IMU_BURST: u16 = 128;
-
-/// The BMI270 driver on the shared bus.
-type Bmi270 = Bmi2<I2cInterface<I2cDevice>, Delay, { IMU_BURST as usize }>;
+/// How long it takes to come back from a soft reset.
+const RESET_TIME: Duration = Duration::from_millis(2);
+/// The wait after switching advanced power save, and before uploading.
+const POWER_SAVE_SWITCH: Duration = Duration::from_micros(450);
+/// How long it takes to start on the configuration (20 ms at most).
+const INITIALISATION_TIME: Duration = Duration::from_millis(20);
 
 /// How long the gyroscope takes to give its first readings once on.
 const GYROSCOPE_START: Duration = Duration::from_millis(50);
@@ -36,7 +33,9 @@ const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 /// The BMI270: its accelerometer, ±8 g at 100 Hz, and its gyroscope,
 /// ±2000 °/s at 100 Hz once [turned on](Self::set_gyroscope).
 pub struct Imu {
-    bmi: Bmi270,
+    device: I2cDevice,
+    /// Where it answered: 0x68 or 0x69.
+    address: u8,
     /// The gyroscope's raw reading at rest, taken off each reading.
     gyroscope_offset: [i32; 3],
 }
@@ -47,9 +46,8 @@ impl Imu {
     /// # Errors
     ///
     /// If the sensor can't be read.
-    pub fn acceleration(&mut self) -> Result<Acceleration, Error> {
-        let data = self.bmi.get_acc_data().map_err(|_| Error::Imu)?;
-        let [x, y, z] = [data.x, data.y, data.z].map(|raw| milli_g(i32::from(raw)));
+    pub async fn acceleration(&mut self) -> Result<Acceleration, Error> {
+        let [x, y, z] = self.axes(register::ACC_DATA).await?.map(milli_g);
         Ok(Acceleration { x, y, z })
     }
 
@@ -59,24 +57,12 @@ impl Imu {
     /// # Errors
     ///
     /// If the sensor doesn't answer.
-    pub fn set_gyroscope(&mut self, on: bool) -> Result<(), Error> {
+    pub async fn set_gyroscope(&mut self, on: bool) -> Result<(), Error> {
         if on {
-            self.bmi
-                .set_gyr_range(GyrRange {
-                    range: GyrRangeVal::Range2000,
-                    ois_range: OisRange::Range2000,
-                })
-                .map_err(|_| Error::Imu)?;
-            self.bmi
-                .set_gyr_conf(GyrConf {
-                    odr: Odr::Odr100,
-                    bwp: GyrBwp::Norm,
-                    noise_perf: PerfMode::Perf,
-                    filter_perf: PerfMode::Perf,
-                })
-                .map_err(|_| Error::Imu)?;
+            self.write(register::GYR_RANGE, GYR_RANGE_2000).await?;
+            self.write(register::GYR_CONF, GYR_CONF_100HZ).await?;
         }
-        self.set_power(on)
+        self.set_power(on).await
     }
 
     /// The rotation rate now.
@@ -89,8 +75,8 @@ impl Imu {
     /// # Errors
     ///
     /// If the sensor can't be read.
-    pub fn rotation(&mut self) -> Result<Rotation, Error> {
-        let raw = self.gyroscope_raw()?;
+    pub async fn rotation(&mut self) -> Result<Rotation, Error> {
+        let raw = self.axes(register::GYR_DATA).await?;
         let [x, y, z] =
             array::from_fn(|axis| millidegrees_per_second(raw[axis] - self.gyroscope_offset[axis]));
         Ok(Rotation { x, y, z })
@@ -108,12 +94,12 @@ impl Imu {
     ///
     /// If the sensor can't be read.
     pub async fn calibrate_gyroscope(&mut self) -> Result<(), Error> {
-        self.set_gyroscope(true)?;
+        self.set_gyroscope(true).await?;
         Timer::after(GYROSCOPE_START).await;
         let mut sum = [0; 3];
         for _ in 0..CALIBRATION_SAMPLES {
             Timer::after(SAMPLE_PERIOD).await;
-            let raw = self.gyroscope_raw()?;
+            let raw = self.axes(register::GYR_DATA).await?;
             for (total, value) in sum.iter_mut().zip(raw) {
                 *total += value;
             }
@@ -122,21 +108,82 @@ impl Imu {
         Ok(())
     }
 
-    /// The gyroscope's reading, in its counts.
-    fn gyroscope_raw(&mut self) -> Result<[i32; 3], Error> {
-        let data = self.bmi.get_gyr_data().map_err(|_| Error::Imu)?;
-        Ok([data.x, data.y, data.z].map(i32::from))
+    /// Powers the accelerometer, and the gyroscope if `gyroscope`.
+    async fn set_power(&mut self, gyroscope: bool) -> Result<(), Error> {
+        let gyroscope = if gyroscope { GYROSCOPE_ON } else { 0 };
+        self.write(register::PWR_CTRL, ACCELEROMETER_ON | gyroscope)
+            .await
     }
 
-    /// Powers the accelerometer, and the gyroscope if `gyroscope`.
-    fn set_power(&mut self, gyroscope: bool) -> Result<(), Error> {
-        self.bmi
-            .set_pwr_ctrl(PwrCtrl {
-                aux_en: false,
-                gyr_en: gyroscope,
-                acc_en: true,
-                temp_en: false,
-            })
+    /// Resets it, uploads its configuration, and turns the accelerometer on
+    /// at ±8 g and 100 Hz.
+    async fn set_up(&mut self) -> Result<(), Error> {
+        self.write(register::CMD, SOFT_RESET).await?;
+        Timer::after(RESET_TIME).await;
+        self.set_power_save(false).await?;
+        let control = self.read(register::INIT_CTRL).await?;
+        self.write(register::INIT_CTRL, control & !1).await?;
+        Timer::after(POWER_SAVE_SWITCH).await;
+        let mut buffer = [0; UPLOAD_CHUNK + 1];
+        buffer[0] = register::INIT_DATA;
+        for ([address_low, address_high], chunk) in bmi270::upload_chunks(&BMI270_CONFIG_FILE) {
+            self.write_all(&[register::INIT_ADDR_0, address_low, address_high])
+                .await?;
+            buffer[1..=chunk.len()].copy_from_slice(chunk);
+            self.write_all(&buffer[..=chunk.len()]).await?;
+        }
+        self.write(register::INIT_CTRL, 1).await?;
+        self.set_power_save(true).await?;
+        Timer::after(INITIALISATION_TIME).await;
+        if self.read(register::INTERNAL_STATUS).await? & INITIALISED == 0 {
+            return Err(Error::Imu);
+        }
+        self.write(register::ACC_RANGE, ACC_RANGE_8G).await?;
+        self.write(register::ACC_CONF, ACC_CONF_100HZ).await?;
+        self.set_power(false).await
+    }
+
+    /// Turns advanced power save on or off.
+    async fn set_power_save(&mut self, on: bool) -> Result<(), Error> {
+        let config = self.read(register::PWR_CONF).await?;
+        let config = if on {
+            config | ADVANCED_POWER_SAVE
+        } else {
+            config & !ADVANCED_POWER_SAVE
+        };
+        self.write(register::PWR_CONF, config).await?;
+        Timer::after(POWER_SAVE_SWITCH).await;
+        Ok(())
+    }
+
+    /// A reading's three axes, in the sensor's counts, from `register` on.
+    async fn axes(&mut self, register: u8) -> Result<[i32; 3], Error> {
+        let mut data = [0; 6];
+        self.device
+            .write_read(self.address, &[register], &mut data)
+            .await
+            .map_err(|_| Error::Imu)?;
+        Ok(bmi270::axes(data))
+    }
+
+    async fn read(&mut self, register: u8) -> Result<u8, Error> {
+        let mut value = [0];
+        self.device
+            .write_read(self.address, &[register], &mut value)
+            .await
+            .map_err(|_| Error::Imu)?;
+        Ok(value[0])
+    }
+
+    async fn write(&mut self, register: u8, value: u8) -> Result<(), Error> {
+        self.write_all(&[register, value]).await
+    }
+
+    /// Writes `bytes`: a register, and what goes in it and those after.
+    async fn write_all(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.device
+            .write(self.address, bytes)
+            .await
             .map_err(|_| Error::Imu)
     }
 }
@@ -148,40 +195,29 @@ impl Imu {
 /// # Errors
 ///
 /// If no BMI270 answers, or it doesn't start.
-pub fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
-    let mut bmi = [I2cAddr::Default, I2cAddr::Alternative]
-        .into_iter()
-        .find_map(|address| {
-            let mut bmi = Bmi270::new_i2c(
-                CriticalSectionDevice::new(bus),
-                Delay::new(),
-                address,
-                Burst::new(IMU_BURST),
-            );
-            bmi.get_chip_id().is_ok_and(|id| id == 0x24).then_some(bmi)
-        })
-        .ok_or(Error::Imu)?;
-    bmi.init(&config::BMI270_CONFIG_FILE)
-        .map_err(|_| Error::Imu)?;
-    bmi.set_acc_range(AccRange::Range8g)
-        .map_err(|_| Error::Imu)?;
-    bmi.set_acc_conf(AccConf {
-        odr: Odr::Odr100,
-        bwp: AccBwp::NormAvg4,
-        filter_perf: PerfMode::Perf,
-    })
-    .map_err(|_| Error::Imu)?;
-    let mut imu = Imu {
-        bmi,
-        gyroscope_offset: [0; 3],
-    };
-    imu.set_power(false)?;
-    Ok(imu)
+pub async fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
+    for address in bmi270::ADDRESSES {
+        let mut imu = Imu {
+            device: I2cDevice::new(bus),
+            address,
+            gyroscope_offset: [0; 3],
+        };
+        if imu
+            .read(register::CHIP_ID)
+            .await
+            .is_ok_and(|id| id == bmi270::CHIP_ID)
+        {
+            imu.set_up().await?;
+            return Ok(imu);
+        }
+    }
+    Err(Error::Imu)
 }
 
 impl fmt::Debug for Imu {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Imu")
+            .field("address", &self.address)
             .field("gyroscope_offset", &self.gyroscope_offset)
             .finish_non_exhaustive()
     }

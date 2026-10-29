@@ -18,6 +18,11 @@ path = "lib.rs"
 bytemuck = "1.24"
 embedded-graphics-core = "0.4"
 
+# The keyboard driver the keyboard's layout came from, to check it against.
+[dev-dependencies]
+cardputer-adv-keyboard = "0.2.6"
+embedded-hal = "1.0"
+
 # The crate's own features that its pure modules mention; off here.
 [features]
 defmt = []

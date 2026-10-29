@@ -6,7 +6,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-- Breaking: the codec's controls are async, ahead of an async I2C bus: `codec`, and `Codec::set_volume`, `set_output`, `set_microphone` and `set_microphone_gain`.
+- Breaking: the I2C bus is async. `I2cBus` is an embassy-sync async mutex and `I2cDevice` embassy-embedded-hal's async device, so a task waiting for the bus lets others run, and no transfer holds interrupts off (they held a critical section, up to 3 ms at a time while the motion sensor started).
+  - Async: `keyboard`, `keyboard_on`, `imu` and `codec`; `Imu::acceleration`, `rotation` and `set_gyroscope`; `Codec::set_volume`, `set_output`, `set_microphone` and `set_microphone_gain`.
+  - The keyboard and the motion sensor have drivers of their own, for the async bus. `keys` is this crate's (`KeyInput`, `Arrow` and `Modifier`, as before) instead of a re-export of cardputer-adv-keyboard, which isn't a dependency any more; `Keyboard::driver_mut` is gone. bmi2 is now only where the BMI270's configuration comes from.
+- `Keyboard::wait_for_inputs` keeps the keys it has read when it's cancelled, and returns them next time.
 
 ## [0.3.0] - 2026-10-28
 

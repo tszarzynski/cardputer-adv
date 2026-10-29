@@ -4,9 +4,9 @@
 //!   embedded-graphics `DrawTarget` (landscape, keyboard below), and its
 //!   [`Backlight`], dimmable by PWM. [`frame_display`] feeds it from a
 //!   [`Frame`] by DMA instead.
-//! - [`keyboard`]: the 56-key keyboard (TCA8418 on I2C), with Shift/Fn layers
-//!   from [`keys`]. [`Keyboard::wait_for_inputs`] sleeps until the TCA8418
-//!   signals a key event on its interrupt line.
+//! - [`keyboard`]: the 56-key keyboard (TCA8418 on I2C). [`Keyboard::wait_for_inputs`]
+//!   sleeps until the TCA8418 signals a key event on its interrupt line,
+//!   and returns what the keys type, with Shift and Fn applied ([`keys`]).
 //! - [`imu`]: the BMI270 motion sensor: its accelerometer, in milli-g, and
 //!   its gyroscope, in milli-degrees a second.
 //! - [`speaker`]: the speaker, fed with samples over I2S (the ES8311 codec,
@@ -40,8 +40,8 @@
 //! // …start esp-rtos (or another embassy-time driver)…
 //! let (mut display, mut backlight) = cardputer_adv::display(display_pins!(p))?;
 //! let bus = cardputer_adv::i2c(i2c_pins!(p))?;
-//! let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11)?;
-//! let mut imu = cardputer_adv::imu(bus)?;
+//! let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11).await?;
+//! let mut imu = cardputer_adv::imu(bus).await?;
 //! // In a task of its own: the speaker, then the codec it clocks.
 //! let mut speaker = cardputer_adv::speaker(speaker_pins!(p))?;
 //! let mut codec = cardputer_adv::codec(bus).await?;
@@ -82,6 +82,7 @@
 
 mod audio;
 mod battery;
+mod bmi270;
 mod button;
 mod codec;
 mod convert;
@@ -93,6 +94,8 @@ mod i2c;
 mod imu;
 mod ir;
 mod keyboard;
+mod keymap;
+pub mod keys;
 mod led;
 mod microphone;
 mod panel;
@@ -110,7 +113,6 @@ pub use button::{Button, button};
 /// The keyboard driver and its key types ([cardputer-adv-keyboard]).
 ///
 /// [cardputer-adv-keyboard]: https://crates.io/crates/cardputer-adv-keyboard
-pub use cardputer_adv_keyboard as keys;
 pub use codec::{Codec, codec};
 pub use convert::battery_percent;
 pub use display::{Backlight, Display, DisplayPins, display};

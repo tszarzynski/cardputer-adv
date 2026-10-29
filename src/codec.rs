@@ -3,8 +3,7 @@
 
 use core::fmt;
 
-use embedded_hal::i2c::I2c as _;
-use embedded_hal_bus::i2c::CriticalSectionDevice;
+use embedded_hal_async::i2c::I2c as _;
 
 use crate::{
     Decibels, Error, I2cBus, I2cDevice, Percent,
@@ -121,15 +120,14 @@ impl Codec {
     }
 
     /// Writes each `[register, value]` in turn.
-    #[expect(
-        clippy::unused_async,
-        reason = "async for the async I2C bus, which comes with the keyboard's and the motion \
-                  sensor's async drivers"
-    )]
     async fn write(&mut self, writes: &[[u8; 2]]) -> Result<(), Error> {
-        writes
-            .iter()
-            .try_for_each(|write| self.device.write(ES8311, write).map_err(|_| Error::Codec))
+        for write in writes {
+            self.device
+                .write(ES8311, write)
+                .await
+                .map_err(|_| Error::Codec)?;
+        }
+        Ok(())
     }
 }
 
@@ -148,7 +146,7 @@ impl Codec {
 /// [`speaker`]: crate::speaker
 pub async fn codec(bus: &'static I2cBus) -> Result<Codec, Error> {
     let mut codec = Codec {
-        device: CriticalSectionDevice::new(bus),
+        device: I2cDevice::new(bus),
         microphone_gain: 0,
     };
     codec

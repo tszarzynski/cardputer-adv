@@ -25,7 +25,19 @@ name = "cardputer-adv-host-tests"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
+ "cardputer-adv-keyboard",
  "embedded-graphics-core",
+ "embedded-hal",
+]
+
+[[package]]
+name = "cardputer-adv-keyboard"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b4d6e744814b631c46be87b83cef1daa17997f565fc5b007cd6111476891165"
+dependencies = [
+ "embedded-hal",
+ "tca8418",
 ]
 
 [[package]]
@@ -36,4 +48,19 @@ checksum = "95743bef3ff70fcba3930246c4e6872882bbea0dcc6da2ca860112e0cd4bd09f"
 dependencies = [
  "az",
  "byteorder",
+]
+
+[[package]]
+name = "embedded-hal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+
+[[package]]
+name = "tca8418"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc5decd215bd300b27fab182f7ef2b742bc914ba138f39b900d77a4bd1e5cce8"
+dependencies = [
+ "embedded-hal",
 ]

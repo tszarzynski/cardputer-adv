@@ -4,14 +4,34 @@ use core::{fmt, mem};
 
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
-use embedded_hal_bus::i2c::CriticalSectionDevice;
+use embedded_hal_async::i2c::I2c as _;
 use esp_hal::{
-    delay::Delay,
     gpio::{Event, Input, InputConfig, Pull},
     peripherals::GPIO11,
 };
 
-use crate::{Error, I2cBus, I2cDevice, I2cPins, i2c, keys};
+use crate::{Error, I2cBus, I2cDevice, I2cPins, i2c, keymap::Keymap, keys::KeyInput};
+
+/// The TCA8418's I2C address.
+const TCA8418: u8 = 0x34;
+
+/// The TCA8418's registers.
+const CFG: u8 = 0x01;
+const INT_STAT: u8 = 0x02;
+/// The number of events in the FIFO, in its low nibble.
+const KEY_LCK_EC: u8 = 0x03;
+/// The FIFO: reading it takes the oldest event.
+const KEY_EVENT_A: u8 = 0x04;
+/// The first of three registers (rows, columns 0–7, columns 8–9) setting
+/// which pins are the key matrix.
+const KP_GPIO1: u8 = 0x1D;
+
+/// `CFG`: the interrupt line goes low on key events.
+const KE_IEN: u8 = 1 << 0;
+/// `INT_STAT`: every flag, to clear them.
+const ALL_INTERRUPTS: u8 = 0x1F;
+/// `KP_GPIO1`–`3`: the keyboard's matrix, rows 0–6 and columns 0–7.
+const MATRIX: [u8; 3] = [0x7F, 0xFF, 0x00];
 
 /// The peripherals the keyboard uses.
 #[derive(Debug)]
@@ -34,10 +54,15 @@ const SPURIOUS_BACKOFF: Duration = Duration::from_millis(10);
 /// events).
 const MAX_INPUTS: usize = 10;
 
-/// The keyboard: the TCA8418 driver and its interrupt line.
+/// The keyboard: the TCA8418 and its interrupt line.
 pub struct Keyboard {
-    keys: keys::Keyboard<I2cDevice>,
+    device: I2cDevice,
     interrupt: Input<'static>,
+    /// Which of Shift and Fn are held.
+    keymap: Keymap,
+    /// Inputs read from the TCA8418 and not yet returned, in order. They're
+    /// kept here so that a cancelled wait loses none of them.
+    inputs: [Option<KeyInput>; MAX_INPUTS],
     /// Events arrived while the last batch was being read: read again
     /// without waiting.
     pending: bool,
@@ -59,12 +84,17 @@ impl Keyboard {
     /// keyboard costs nothing. It waits for the low *level*, not an edge:
     /// events that arrive while the caller is busy keep the line low.
     ///
+    /// Cancelling it (in a `select`, say) loses no key that's been read: the
+    /// next call returns it. The one exception is a cancel in the middle of
+    /// an I2C transfer that's taking an event from the TCA8418, which can
+    /// lose that one.
+    ///
     /// # Errors
     ///
     /// If the TCA8418 can't be read over I2C.
-    pub async fn wait_for_inputs(&mut self) -> Result<impl Iterator<Item = keys::KeyInput>, Error> {
+    pub async fn wait_for_inputs(&mut self) -> Result<impl Iterator<Item = KeyInput>, Error> {
         loop {
-            let wake = if mem::take(&mut self.pending) {
+            let wake = if mem::take(&mut self.pending) || self.inputs[0].is_some() {
                 Wake::Pending
             } else {
                 match select(self.interrupt.wait_for_low(), Timer::after(FALLBACK_POLL)).await {
@@ -72,40 +102,40 @@ impl Keyboard {
                     Either::Second(()) => Wake::Fallback,
                 }
             };
-            let events = self.keys.events().map_err(|_| Error::Keyboard)?;
+            let count = self.event_count().await?;
+            // As many as there's room for: the rest stay in the FIFO, and
+            // keep the line low, for next time.
+            let room = self.inputs.iter().filter(|input| input.is_none()).count();
+            for _ in 0..usize::from(count).min(room) {
+                let event = self.read(KEY_EVENT_A).await?;
+                // Releases (and numbers that aren't keys) type nothing.
+                if let Some(input) = self.keymap.input(event)
+                    && let Some(slot) = self.inputs.iter_mut().find(|slot| slot.is_none())
+                {
+                    *slot = Some(input);
+                }
+            }
             // Clear every flag (key events, overflow, …) so no source keeps
             // the line low, then catch an event that landed in between. The
             // keys are already read, so a failure here mustn't lose them:
             // read again on the next call instead.
-            let cleared = self.keys.clear_interrupts().is_ok();
-            self.pending = !cleared || self.keys.events_available().unwrap_or(true);
+            let cleared = self.write(INT_STAT, ALL_INTERRUPTS).await.is_ok();
+            self.pending = !cleared || !self.event_count().await.is_ok_and(|count| count == 0);
 
-            let mut events = events.peekable();
-            let any_event = events.peek().is_some();
-            let mut inputs = [None; MAX_INPUTS];
-            for (slot, input) in inputs
-                .iter_mut()
-                .zip(events.filter_map(|event| event.input))
-            {
-                *slot = Some(input);
-            }
-            if !any_event {
-                // Woken with nothing to read: back off, so a line stuck low
-                // can't keep this task from yielding.
-                if wake == Wake::Interrupt {
-                    Timer::after(SPURIOUS_BACKOFF).await;
-                }
-                continue;
-            }
-            if wake == Wake::Fallback {
+            if count > 0 && wake == Wake::Fallback {
                 // Events without an interrupt: the line isn't working.
                 self.missed = self.missed.saturating_add(1);
             }
-            // Releases (and lone modifiers) are events without an input.
-            if inputs[0].is_none() {
-                continue;
+            if self.inputs[0].is_some() {
+                return Ok(mem::replace(&mut self.inputs, [None; MAX_INPUTS])
+                    .into_iter()
+                    .flatten());
             }
-            return Ok(inputs.into_iter().flatten());
+            if count == 0 && wake == Wake::Interrupt {
+                // Woken with nothing to read: back off, so a line stuck low
+                // can't keep this task from yielding.
+                Timer::after(SPURIOUS_BACKOFF).await;
+            }
         }
     }
 
@@ -124,10 +154,41 @@ impl Keyboard {
         self.missed
     }
 
-    /// The underlying driver, for anything [`wait_for_inputs`](Self::wait_for_inputs)
-    /// doesn't cover.
-    pub const fn driver_mut(&mut self) -> &mut keys::Keyboard<I2cDevice> {
-        &mut self.keys
+    /// Sets the TCA8418 up: the key matrix, an empty FIFO, and the interrupt
+    /// on key events.
+    async fn set_up(&mut self) -> Result<(), Error> {
+        for (register, pins) in (KP_GPIO1..).zip(MATRIX) {
+            self.write(register, pins).await?;
+        }
+        // Drop what's queued from before.
+        for _ in 0..self.event_count().await? {
+            self.read(KEY_EVENT_A).await?;
+        }
+        self.write(INT_STAT, ALL_INTERRUPTS).await?;
+        let config = self.read(CFG).await?;
+        self.write(CFG, config | KE_IEN).await?;
+        self.write(INT_STAT, ALL_INTERRUPTS).await
+    }
+
+    /// How many events the FIFO holds.
+    async fn event_count(&mut self) -> Result<u8, Error> {
+        Ok(self.read(KEY_LCK_EC).await? & 0x0F)
+    }
+
+    async fn read(&mut self, register: u8) -> Result<u8, Error> {
+        let mut value = [0];
+        self.device
+            .write_read(TCA8418, &[register], &mut value)
+            .await
+            .map_err(|_| Error::Keyboard)?;
+        Ok(value[0])
+    }
+
+    async fn write(&mut self, register: u8, value: u8) -> Result<(), Error> {
+        self.device
+            .write(TCA8418, &[register, value])
+            .await
+            .map_err(|_| Error::Keyboard)
     }
 }
 
@@ -142,16 +203,16 @@ impl Keyboard {
 /// # Panics
 ///
 /// If the bus was already set up (by an earlier call, or [`i2c`]).
-pub fn keyboard(pins: KeyboardPins) -> Result<Keyboard, Error> {
+pub async fn keyboard(pins: KeyboardPins) -> Result<Keyboard, Error> {
     let bus = i2c(pins.i2c)?;
-    keyboard_on(bus, pins.interrupt)
+    keyboard_on(bus, pins.interrupt).await
 }
 
 /// Tries at setting up the TCA8418: right after a flash or a reset it can
 /// miss the first transfers.
 const KEYBOARD_TRIES: u32 = 5;
 /// The wait between those tries.
-const KEYBOARD_RETRY_MS: u32 = 20;
+const KEYBOARD_RETRY: Duration = Duration::from_millis(20);
 
 /// Initialises the keyboard on the shared bus, and its interrupt.
 ///
@@ -159,31 +220,28 @@ const KEYBOARD_RETRY_MS: u32 = 20;
 ///
 /// If the TCA8418 can't be set up, after five tries (it can miss the first
 /// transfers right after a flash or a reset).
-pub fn keyboard_on(bus: &'static I2cBus, interrupt: GPIO11<'static>) -> Result<Keyboard, Error> {
-    let set_up = || -> Result<keys::Keyboard<I2cDevice>, Error> {
-        let mut keys =
-            keys::Keyboard::new(CriticalSectionDevice::new(bus)).map_err(|_| Error::Keyboard)?;
-        keys.enable_keyboard_interrupt()
-            .map_err(|_| Error::Keyboard)?;
-        keys.clear_interrupts().map_err(|_| Error::Keyboard)?;
-        Ok(keys)
-    };
-    let keys = (0..KEYBOARD_TRIES)
-        .find_map(|attempt| {
-            if attempt > 0 {
-                Delay::new().delay_millis(KEYBOARD_RETRY_MS);
-            }
-            set_up().ok()
-        })
-        .ok_or(Error::Keyboard)?;
-    // The TCA8418's INT is open-drain.
-    let interrupt = Input::new(interrupt, InputConfig::default().with_pull(Pull::Up));
-    Ok(Keyboard {
-        keys,
-        interrupt,
+pub async fn keyboard_on(
+    bus: &'static I2cBus,
+    interrupt: GPIO11<'static>,
+) -> Result<Keyboard, Error> {
+    let mut keyboard = Keyboard {
+        device: I2cDevice::new(bus),
+        // The TCA8418's INT is open-drain.
+        interrupt: Input::new(interrupt, InputConfig::default().with_pull(Pull::Up)),
+        keymap: Keymap::default(),
+        inputs: [None; MAX_INPUTS],
         pending: false,
         missed: 0,
-    })
+    };
+    for attempt in 0..KEYBOARD_TRIES {
+        if attempt > 0 {
+            Timer::after(KEYBOARD_RETRY).await;
+        }
+        if keyboard.set_up().await.is_ok() {
+            return Ok(keyboard);
+        }
+    }
+    Err(Error::Keyboard)
 }
 
 impl fmt::Debug for Keyboard {

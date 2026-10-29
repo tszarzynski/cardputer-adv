@@ -88,7 +88,7 @@ async fn main(spawner: Spawner) -> ! {
     screen.show(0, false, format_args!("HARDWARE TEST - keep it still..."));
     let bus = cardputer_adv::i2c(cardputer_adv::i2c_pins!(p)).expect("I2C bus");
 
-    let mut imu = cardputer_adv::imu(bus).expect("motion sensor");
+    let mut imu = cardputer_adv::imu(bus).await.expect("motion sensor");
     imu.calibrate_gyroscope().await.expect("gyroscope");
     info!("{imu:?}");
 
@@ -222,7 +222,7 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
             format_args!("3. Clap near it: loudest {loudest}"),
         );
 
-        match (imu.acceleration(), imu.rotation()) {
+        match (imu.acceleration().await, imu.rotation().await) {
             (Ok(acceleration @ Acceleration { x, y, z }), Ok(rotation)) => {
                 info!("motion: {acceleration:?} mg, {rotation:?} m°/s");
                 tilted |= x.abs() >= TILTED_MG || y.abs() >= TILTED_MG;

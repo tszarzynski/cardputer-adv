@@ -1,11 +1,9 @@
 //! The I2C bus the keyboard, the codec and the motion sensor share.
 
-use core::cell::RefCell;
-
-use critical_section::Mutex;
-use embedded_hal_bus::i2c::CriticalSectionDevice;
+use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice as SharedDevice;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use esp_hal::{
-    Blocking,
+    Async,
     i2c::master::{Config as I2cConfig, I2c},
     peripherals::{GPIO8, GPIO9, I2C0},
     time::Rate,
@@ -16,14 +14,14 @@ use crate::Error;
 
 /// The I2C bus: the keyboard, the ES8311 codec and the BMI270 share it.
 ///
-/// Each transfer holds a critical section (interrupts off, the other core
-/// kept out), so its devices can be used from any executor or core. That
-/// delays interrupts by the transfer: about 0.3 ms for a key or motion
-/// read, and 3 ms for each 128-byte burst of the motion sensor's start-up.
-pub type I2cBus = Mutex<RefCell<I2c<'static, Blocking>>>;
+/// Its transfers are async, and an async mutex takes turns between its
+/// devices: a task waiting for the bus, or for a transfer, lets the others
+/// run, and interrupts aren't held off. The mutex is a critical-section
+/// one, so the devices can be used from any executor or core.
+pub type I2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 
 /// One device's handle on the shared [`I2cBus`].
-pub type I2cDevice = CriticalSectionDevice<'static, I2c<'static, Blocking>>;
+pub type I2cDevice = SharedDevice<'static, CriticalSectionRawMutex, I2c<'static, Async>>;
 
 /// The peripherals the I2C bus uses.
 #[expect(missing_docs, reason = "the fields are the pins they're named after")]
@@ -51,6 +49,7 @@ pub fn i2c(pins: I2cPins) -> Result<&'static I2cBus, Error> {
     )
     .map_err(|_| Error::I2c)?
     .with_sda(pins.sda)
-    .with_scl(pins.scl);
-    Ok(BUS.init(Mutex::new(RefCell::new(i2c))))
+    .with_scl(pins.scl)
+    .into_async();
+    Ok(BUS.init(Mutex::new(i2c)))
 }

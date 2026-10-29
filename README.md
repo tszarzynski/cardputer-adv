@@ -33,19 +33,20 @@ What the Cardputer ADV has, and what this crate covers so far.
   - Only pixels whose colour changed are sent: each run of changed rows goes as one rectangle, as wide as its changes. Redrawing the whole frame every time is fine.
   - A whole frame takes 13 ms at 40 MHz. Drawing straight to the panel through `display` sends a frame in about 28 ms, converting pixel by pixel.
   - `FrameDisplay::set_asleep(true).await` puts the panel's controller to sleep (a few µA instead of a few mA) with the picture kept in its memory; `set_asleep(false)` wakes it. Turn the backlight off first.
-- `keyboard(KeyboardPins)` sets up the 56-key TCA8418 keyboard on I2C, with Shift and Fn layers from [cardputer-adv-keyboard](https://crates.io/crates/cardputer-adv-keyboard). Fn + `;` `.` `,` `/` gives the arrow keys.
+- `keyboard(KeyboardPins).await` sets up the 56-key TCA8418 keyboard on I2C, with Shift and Fn layers (`keys::KeyInput`; the layout is [cardputer-adv-keyboard](https://crates.io/crates/cardputer-adv-keyboard)'s). Fn + `;` `.` `,` `/` gives the arrow keys.
 - `Keyboard::wait_for_inputs().await` sleeps until the TCA8418 pulls its interrupt line (GPIO11) low, then returns the keys pressed.
   - It waits for the low level, not an edge, so events that arrive while you're busy aren't lost.
   - A 1 s fallback poll covers a missed interrupt; `missed_interrupts()` counts how often that poll was needed.
+  - Cancelling it (in a `select`) loses no key it has read: the next call returns it.
   - `Keyboard::listen_for_wake()`, just before esp-hal's `LowPower::sleep_light`, makes a key press end the light sleep; `wait_for_inputs` then reads the key.
-- `imu(&I2cBus)` finds the BMI270 motion sensor (at 0x68 or 0x69), uploads its configuration through [bmi2](https://crates.io/crates/bmi2) and turns on its accelerometer at ±8 g and 100 Hz. `Imu::acceleration()` reads it in milli-g.
+- `imu(&I2cBus).await` finds the BMI270 motion sensor (at 0x68 or 0x69), uploads its configuration (Bosch's, from [bmi2](https://crates.io/crates/bmi2)) and turns on its accelerometer at ±8 g and 100 Hz. `Imu::acceleration().await` reads it in milli-g.
 - `speaker(SpeakerPins)` starts a 16-bit, 44.1 kHz I2S stream over DMA to the ES8311 codec, playing silence. `codec(&I2cBus).await` then turns on the codec's DAC path to the NS4150B amplifier and returns a `Codec`, whose `set_volume(percent).await` sets its level. `Speaker::run(fill).await` keeps the stream fed with the mono samples your closure writes.
   - The buffer holds 23 ms. If `fill` falls further behind, the stream restarts on silence, so the sound skips rather than stops.
   - `Codec::set_output(false)` powers the codec's DAC and its path to the amplifier down, and `set_output(true)` brings them back. Turn it off before the I2S clock stops (in a light sleep): the codec clocks itself from the stream, and the clock stopping and starting clicks in the speaker.
   - To avoid skips while anything else holds the CPU for longer (drawing a frame straight to the panel takes about 30 ms), run the speaker on a higher-priority executor, such as esp-rtos's `InterruptExecutor`.
 - `i2c(I2cPins)` sets up the I2C bus that the keyboard, codec and motion sensor share. Pass it to `keyboard_on`, `imu` and `codec`. `keyboard(KeyboardPins)` sets the bus up itself, for when the keyboard is all you need.
 - `audio(AudioPins)` starts the speaker's stream and the microphone's together, on the same I2S clocks, and returns an `Audio`. Once `codec` has set the codec up, `Codec::set_microphone(true)` turns its ADC on, and `Codec::set_microphone_gain(db)` sets its preamp (0–30 dB, in 3 dB steps). `Audio::run(fill, take).await` plays what `fill` writes and hands what's heard to `take`, up to 256 mono samples at a time; the two run together because the microphone runs on the speaker's clocks. A stream that falls more than 23 ms behind restarts, so its sound has a gap.
-- `Imu::set_gyroscope(true)` turns the BMI270's gyroscope on (±2000 °/s at 100 Hz; it draws about 0.9 mA, so `imu` leaves it off), and `Imu::rotation()` reads it in milli-degrees a second. Uncalibrated it can read several degrees a second at rest (from 0.5 to 9 °/s in different runs on the ADV tested); `Imu::calibrate_gyroscope().await`, with the Cardputer lying still for about 0.4 s, measures that offset and takes it off from then on.
+- `Imu::set_gyroscope(true).await` turns the BMI270's gyroscope on (±2000 °/s at 100 Hz; it draws about 0.9 mA, so `imu` leaves it off), and `Imu::rotation().await` reads it in milli-degrees a second. Uncalibrated it can read several degrees a second at rest (from 0.5 to 9 °/s in different runs on the ADV tested); `Imu::calibrate_gyroscope().await`, with the Cardputer lying still for about 0.4 s, measures that offset and takes it off from then on.
 - `rmt(RMT)` sets up the RMT peripheral for the RGB LED and the IR transmitter; give each one of its transmit channels. `rgb_led(channel, GPIO21)` returns an `RgbLed`, and `RgbLed::set_color(Rgb888).await` sets it (black is off). It's powered through the backlight's switch, so it's lit only while the backlight is, and dims with it.
 - `ir_transmitter(channel, GPIO44)` returns an `IrTransmitter`, which sends on a 38 kHz carrier. NEC codes: `send_nec(NecCode { address, command })`, `send_nec_extended(ExtendedNecCode { … })` for a 16-bit address, and `send_nec_repeat` for a held button. Any other protocol's (Sony, RC5, Samsung, an air conditioner's), or timings recorded from a remote: `send_raw(&[Pulse { mark_us, space_us }, …])`, each the carrier on for `mark_us` µs and then off for `space_us` µs, up to `IrTransmitter::MAX_PULSES` (128) pulses.
 - `button(GPIO0)` returns the G0 `Button`: `is_pressed()`, `wait_for_press().await` (debounced), and `listen_for_wake()` to wake the chip from light sleep, as `Keyboard::listen_for_wake` does.
@@ -58,7 +59,7 @@ use cardputer_adv::{display_pins, keyboard_pins};
 use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
 
 let (mut display, mut backlight) = cardputer_adv::display(display_pins!(p))?;
-let mut keyboard = cardputer_adv::keyboard(keyboard_pins!(p))?;
+let mut keyboard = cardputer_adv::keyboard(keyboard_pins!(p)).await?;
 display.clear(Rgb565::BLACK).expect("LCD"); // mipidsi's own error type
 loop {
     for key in keyboard.wait_for_inputs().await? { /* … */ }
@@ -71,9 +72,9 @@ With the motion sensor and the speaker, set the shared bus up first:
 use cardputer_adv::{Acceleration, Percent, i2c_pins, speaker_pins};
 
 let bus = cardputer_adv::i2c(i2c_pins!(p))?;
-let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11)?;
-let mut imu = cardputer_adv::imu(bus)?;
-let Acceleration { x, y, z } = imu.acceleration()?; // milli-g
+let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11).await?;
+let mut imu = cardputer_adv::imu(bus).await?;
+let Acceleration { x, y, z } = imu.acceleration().await?; // milli-g
 
 // In a task (ideally on a higher-priority executor):
 let mut speaker = cardputer_adv::speaker(speaker_pins!(p))?;
@@ -125,7 +126,7 @@ loop {
 - esp-hal 1.2, with its `unstable` feature (LEDC, I2S, RMT and light sleep are behind it), on an ESP32-S3.
 - The `sd-card` feature, for the microSD card. It's off by default, so apps without a card don't build embedded-sdmmc.
 - The `defmt` feature, for `defmt::Format` on `Error`, if your app logs with defmt.
-- An embassy-time driver, for the async parts (`Keyboard::wait_for_inputs`, `FrameDisplay::flush`, `Speaker::run`): esp-rtos's, say.
+- An embassy-time driver, for the async parts (the keyboard and the motion sensor, from setting them up on, `FrameDisplay::flush`, `Speaker::run`): esp-rtos's, say.
 - `Display` is a [mipidsi](https://crates.io/crates/mipidsi) type; the crate re-exports `mipidsi`, so you can name its types without depending on it yourself.
 
 ## Sleeping while the screen is dark
@@ -171,7 +172,7 @@ While the chip sleeps its USB is off (no log, no flashing until it wakes), and t
 | IR LED | 44 |
 | microSD SCK / MOSI / MISO / CS (SPI3) | 40 / 14 / 39 / 12 |
 
-The I2C bus is a `critical_section::Mutex`, shared by embedded-hal-bus's `CriticalSectionDevice`s, so the keyboard, the codec and the motion sensor can be used from any executor or core. Each transfer holds the critical section, which delays interrupts by about 0.3 ms for a key or motion read. The motion sensor's start-up holds it for 3 ms per 128-byte burst.
+The I2C bus is async, shared through an async mutex (embassy-sync's, with embassy-embedded-hal's `I2cDevice`s), so the keyboard, the codec and the motion sensor can be used from any executor or core. A task waiting for the bus or a transfer lets the others run, and no transfer holds interrupts off, not even the motion sensor's 8 kB start-up.
 
 ## Status
 
