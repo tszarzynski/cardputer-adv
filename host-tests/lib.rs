@@ -1,8 +1,9 @@
 //! The crate's pure logic, from its own source files, built for the host
 //! so the tests in them run: the battery estimate and the other unit
 //! conversions, the RGB LED's and the IR codes' pulses, the framebuffer's
-//! change tracking, the keyboard's layout and the motion sensor's
-//! configuration upload.
+//! change tracking, the keyboard's layout and its controller's
+//! reading (against a fake TCA8418), and the motion sensor's configuration
+//! upload.
 //!
 //! The modules sit at the root, as in the crate, so their `crate::` paths
 //! resolve the same here.
@@ -26,6 +27,8 @@ pub mod keys;
 mod panel;
 #[path = "../src/pulses.rs"]
 mod pulses;
+#[path = "../src/tca8418.rs"]
+mod tca8418;
 #[path = "../src/units.rs"]
 mod units;
 

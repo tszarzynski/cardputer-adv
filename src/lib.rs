@@ -105,6 +105,7 @@ mod remote;
 #[cfg(feature = "sd-card")]
 mod sd_card;
 mod speaker;
+mod tca8418;
 mod units;
 
 pub use audio::{Audio, AudioPins, audio};

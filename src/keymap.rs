@@ -71,6 +71,15 @@ pub struct Keymap {
 }
 
 impl Keymap {
+    /// No keys held.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            shift: false,
+            fn_held: false,
+        }
+    }
+
     /// What a key event (a `KEY_EVENT_A` byte: bit 7 set for a press, then
     /// the key number) types: `None` for a release, or a number that isn't
     /// a key. A modifier's own press types [`KeyInput::Modifier`].
