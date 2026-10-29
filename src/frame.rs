@@ -20,6 +20,12 @@ use crate::{HEIGHT, WIDTH};
 const W: usize = WIDTH as usize;
 const H: usize = HEIGHT as usize;
 
+/// The pixels the SPI bus sends in the time one transfer takes to set up
+/// (about 22 µs, at about 4.6 MB/s): what each row of a run narrower than
+/// the screen costs over its own pixels, since it's a transfer of its own
+/// (measured with `examples/flush.rs`).
+const TRANSFER_SETUP_PIXELS: usize = 50;
+
 /// The columns of a row written since the last flush, `first..=last`.
 /// Clean when `first > last`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,8 +155,9 @@ impl Frame {
 
     /// The next run of rows to send, from row `from` on: rows that were
     /// written and differ from what was sent, as one rectangle as wide as
-    /// what was drawn on them. Rows found unchanged on the way are marked
-    /// clean.
+    /// what was drawn on them, or whole rows when that's quicker to send
+    /// (their other pixels are what the panel shows already). Rows found
+    /// unchanged on the way are marked clean.
     pub(crate) fn next_run(&mut self, from: usize) -> Option<Run> {
         let mut y = from;
         while y < H {
@@ -164,10 +171,15 @@ impl Frame {
                 y += 1;
             }
             if !span.is_clean() {
-                return Some(Run {
-                    rows: top..y,
-                    columns: usize::from(span.first)..=usize::from(span.last),
-                });
+                let (rows, mut columns) =
+                    (top..y, usize::from(span.first)..=usize::from(span.last));
+                // Whole rows go as one transfer: worth it when the columns
+                // added cost less than the transfers saved.
+                let added = W - columns.clone().count();
+                if added * rows.len() < (rows.len() - 1) * TRANSFER_SETUP_PIXELS {
+                    columns = 0..=W - 1;
+                }
+                return Some(Run { rows, columns });
             }
             y += 1;
         }
@@ -382,6 +394,25 @@ mod tests {
         fill(&mut frame, 300, 10, 10, Rgb565::BLUE);
         dot(&mut frame, -1, 200, Rgb565::BLUE);
         assert_eq!(flush(&mut frame), []);
+    }
+
+    #[test]
+    fn a_nearly_full_width_run_is_sent_as_whole_rows() {
+        let mut frame = shown();
+        let rows = |x, y, width, height| Rectangle::new(Point::new(x, y), Size::new(width, height));
+        // Tall and 200 wide: one transfer beats a transfer a row.
+        let Ok(()) = frame.fill_solid(&rows(20, 0, 200, 100), Rgb565::RED);
+        assert_eq!(flush(&mut frame), [run(0..100, 0..=W - 1)]);
+        // Two rows that wide: 40 columns more on each cost more than the
+        // one transfer saved.
+        let Ok(()) = frame.fill_solid(&rows(20, 0, 200, 2), Rgb565::BLUE);
+        assert_eq!(flush(&mut frame), [run(0..2, 20..=219)]);
+        // One row is one transfer either way.
+        let Ok(()) = frame.fill_solid(&rows(1, 5, 238, 1), Rgb565::BLUE);
+        assert_eq!(flush(&mut frame), [run(5..6, 1..=238)]);
+        // Narrow and tall: the columns cost too much.
+        let Ok(()) = frame.fill_solid(&rows(60, 0, 120, HEIGHT.into()), Rgb565::GREEN);
+        assert_eq!(flush(&mut frame), [run(0..H, 60..=179)]);
     }
 
     #[test]

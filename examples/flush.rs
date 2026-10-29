@@ -3,8 +3,10 @@
 //! and the bytes it sends a second.
 //!
 //! A run of changed rows narrower than the screen goes as one transfer a
-//! row; a full-width run, as one transfer. The tall cases compare the two
-//! for the same rows, to show what the per-row transfers cost.
+//! row; a full-width run, as one transfer, and so does one nearly as wide
+//! (`TRANSFER_SETUP_PIXELS` in `src/frame.rs` sets how nearly). The tall
+//! cases compare the two for the same rows, to show what the per-row
+//! transfers cost.
 //!
 //! `just flush`, or `cargo run --release --example flush`
 

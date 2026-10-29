@@ -29,6 +29,7 @@ follows [Semantic Versioning](https://semver.org/).
   - `Acceleration` and `Rotation`, with `x`, `y` and `z` fields, for `Imu::acceleration` and `Imu::rotation` (were `[i32; 3]`).
   - `NecCode` and `ExtendedNecCode` for `IrTransmitter::send_nec` and `send_nec_extended` (were two arguments each), and `Pulse { mark_us, space_us }` for `send_raw` (was `(u16, u16)`).
 - `FrameDisplay::flush` and `set_asleep` deselect the panel even when cancelled mid-transfer, so the next transfer starts cleanly.
+- `FrameDisplay::flush` sends a run of changed rows nearly as wide as the screen (about 190 pixels, for a tall run) as whole rows, in one transfer instead of one a row: 135 rows 200 wide took longer than the whole screen.
 
 ## [0.2.1] - 2026-10-27
 
