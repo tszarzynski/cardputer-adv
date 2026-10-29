@@ -115,7 +115,7 @@ static FRAME: ConstStaticCell<Frame> = ConstStaticCell::new(Frame::new());
 let (mut display, _backlight) = cardputer_adv::frame_display(display_pins!(p), p.DMA_CH1)?;
 let frame = FRAME.take();
 loop {
-    frame.clear(Rgb565::BLACK)?; // Infallible
+    let Ok(()) = frame.clear(Rgb565::BLACK); // it can't fail
     // …draw the rest…
     display.flush(frame).await?; // only what changed
 }
@@ -134,7 +134,10 @@ loop {
 The ESP32-S3 can light-sleep (about 1 mA) and carry on where it left off, woken by a key. In this order, with esp-hal's `LowPower`:
 
 ```rust
-use esp_hal::rtc_cntl::sleep::{LowPower, RtcSleepConfig};
+use esp_hal::{
+    rtc_cntl::sleep::{LowPower, RtcSleepConfig},
+    time::{Duration, Instant},
+};
 
 let mut low_power = LowPower::new(p.LPWR);
 
@@ -145,7 +148,7 @@ codec.set_output(false).await?;  // before the I2S clock stops, or the speaker c
 
 // Each time round while dark:
 keyboard.listen_for_wake();      // a key press ends the sleep
-low_power.set_wakeup_deadline(esp_hal::time::Instant::now() + Duration::from_millis(250));
+low_power.set_wakeup_deadline(Instant::now() + Duration::from_millis(250));
 low_power.sleep_light(RtcSleepConfig::default()); // returns at the key, or the deadline
 // …look at the motion sensor, say, then read keys with wait_for_inputs as usual.
 
