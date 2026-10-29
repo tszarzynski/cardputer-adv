@@ -15,6 +15,7 @@ follows [Semantic Versioning](https://semver.org/).
 - `Keyboard::wait_for_inputs` keeps the keys it has read when it's cancelled, and returns them next time.
 - `Keyboard::is_held` says whether a key is held down (for games, and chords such as Ctrl + C), by what it types with or without Shift and Fn.
 - README: the framebuffer and sleep examples compile (`Frame::clear` can't fail, so no `?`; the sleep example imports `Duration` and `Instant`).
+- `examples/flush.rs` (`just flush`) times `FrameDisplay::flush` on a Cardputer for changed areas of different shapes, and logs it.
 - CI: `just semver` checks the public API against the last release on crates.io with cargo-semver-checks, so a breaking change can't go out without a new version.
 - Host tests: the keyboard's controller (`tca8418`, apart from its interrupt line and the waiting) runs against a fake TCA8418, covering a read that's cancelled partway, a failed read or flag clear, events left in the FIFO, and the missed-interrupt count.
 - The README's examples and the crate docs' quick start are compiled by `just readme` (part of `just check`, so CI), so they can't go stale again.

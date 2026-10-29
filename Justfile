@@ -7,7 +7,7 @@ esp := "if [ -f ~/export-esp.sh ]; then . ~/export-esp.sh; fi"
 
 # formatting, and clippy (pedantic and nursery; warnings are errors), with no features and with all of them, and the example; then the README's examples
 check: && readme
-    {{esp}} && cargo fmt -- --check && cargo clippy --release -- -D warnings && cargo clippy --release --all-features --example hardware -- -D warnings
+    {{esp}} && cargo fmt -- --check && cargo clippy --release -- -D warnings && cargo clippy --release --all-features --example hardware -- -D warnings && cargo clippy --release --example flush -- -D warnings
 
 # the README's examples and the crate docs' quick start, compiled (readme-check/ takes them out of their files), with fmt and clippy on its own code
 readme:
@@ -21,13 +21,17 @@ test:
 fix:
     cargo fmt
 
-# build the crate, and the hardware test
+# build the crate, the hardware test and the flush timing
 build:
-    {{esp}} && cargo build --release && cargo build --release --all-features --example hardware
+    {{esp}} && cargo build --release && cargo build --release --all-features --example hardware && cargo build --release --example flush
 
 # try each part on a Cardputer and follow its log (examples/hardware.rs says what to look for)
 hardware:
     {{esp}} && cargo run --release --features sd-card --example hardware
+
+# time FrameDisplay::flush on a Cardputer for changed areas of different shapes, and log it (examples/flush.rs)
+flush:
+    {{esp}} && cargo run --release --example flush
 
 # the API docs, with all the features, in target/xtensa-esp32s3-none-elf/doc/ (docs.rs can't build for Xtensa; CI publishes them to GitHub Pages)
 # The flags go to this crate's rustdoc only: with RUSTDOCFLAGS set, xtensa-lx-rt's build script stops checking the target and sets up the plain ESP32, which later builds reuse.
