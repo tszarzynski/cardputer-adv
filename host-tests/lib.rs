@@ -3,7 +3,7 @@
 //! conversions, the RGB LED's and the IR codes' pulses, the framebuffer's
 //! change tracking, the keyboard's layout and its controller's
 //! reading (against a fake TCA8418), the motion sensor's configuration
-//! upload, and the speaker's tones.
+//! upload, the speaker's tones, and screenshots' encoding.
 //!
 //! The modules sit at the root, as in the crate, so their `crate::` paths
 //! resolve the same here.
@@ -29,6 +29,8 @@ mod panel;
 mod pulses;
 #[path = "../src/repeat.rs"]
 mod repeat;
+#[path = "../src/screenshot.rs"]
+mod screenshot;
 #[path = "../src/tca8418.rs"]
 mod tca8418;
 #[path = "../src/tone.rs"]

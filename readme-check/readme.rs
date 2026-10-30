@@ -16,14 +16,14 @@
 use core::panic::PanicInfo;
 
 use cardputer_adv::{
-    Backlight, Codec, Error, FrameDisplay, I2cBus, Keyboard, Percent, display_pins,
+    Backlight, Codec, Display, Error, Frame, FrameDisplay, I2cBus, Keyboard, Percent, display_pins,
 };
 use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
 use esp_hal::peripherals::Peripherals;
 
 include!(concat!(env!("OUT_DIR"), "/count.rs"));
 const _: () = assert!(
-    README == 5 && CRATE_DOCS == 1,
+    README == 6 && CRATE_DOCS == 1,
     "an example without a function here, or a function without its example"
 );
 
@@ -72,6 +72,16 @@ async fn sleeping(
     mut keyboard: Keyboard,
 ) -> Result<(), Error> {
     example!("readme", 5);
+    Ok(())
+}
+
+/// Screenshots, of a framebuffer and of drawing straight to the screen.
+async fn screenshots(
+    mut display: FrameDisplay,
+    frame: &'static mut Frame,
+    mut lcd: Display,
+) -> Result<(), Error> {
+    example!("readme", 6);
     Ok(())
 }
 

@@ -199,6 +199,12 @@ impl Frame {
         self.stale = false;
     }
 
+    /// All the pixels, row by row, each `u16`'s bytes in memory the
+    /// colour's, big-endian.
+    pub(crate) const fn pixels(&self) -> &[u16] {
+        &self.pixels
+    }
+
     /// Row `row`'s pixels in `columns`, as the bytes the panel takes.
     pub(crate) fn row_bytes(&self, row: usize, columns: RangeInclusive<usize>) -> &[u8] {
         let (first, last) = columns.into_inner();

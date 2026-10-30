@@ -1,6 +1,6 @@
 //! The LCD fed from a [`Frame`] by DMA.
 
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::{
     Async,
@@ -14,7 +14,24 @@ use crate::{
     display::{backlight, init_panel, spi_config},
     frame::Run,
     panel::PANEL_OFFSET,
+    screenshot::Screenshot,
 };
+
+impl Frame {
+    /// A screenshot of the frame as it is now, stamped with the time: it
+    /// formats as one line of text, for the app to log over USB
+    /// (`info!("{}", frame.screenshot())`, say). `tools/screenshots.py`, in
+    /// the crate's repository, turns a log of them into PNGs and a GIF.
+    ///
+    /// Logging one takes a while: a screen of small text is about 20 kB,
+    /// which esp-println sends over USB in about 0.1 s, with interrupts
+    /// held off, so sound stalls meanwhile. Animations keep their pace, as
+    /// they go by the clock, but frames drawn while it's sent aren't seen.
+    #[must_use]
+    pub fn screenshot(&self) -> Screenshot<'_> {
+        Screenshot::new(self.pixels(), Instant::now().as_millis())
+    }
+}
 
 /// The LCD, fed from a [`Frame`] by DMA: sending a whole frame takes about
 /// 13 ms (64.8 kB at 40 MHz), during which other tasks run.

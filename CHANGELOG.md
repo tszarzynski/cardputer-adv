@@ -6,6 +6,9 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- README: GIFs of the hardware example and of backgammon, made with screenshots from the device, and a Built with cardputer-adv section.
+- Screenshots: `Frame::screenshot()` gives what the screen shows as one line of text (`Screenshot`, starting `SCREENSHOT_MARKER`) for the app to log (sound stalls meanwhile: esp-println holds interrupts off while it prints), and `Mirror` copies drawing straight to the `Display` into a `Frame`, for apps without one. `tools/screenshots.py` turns a log of them into PNGs, and `just gif` into a GIF; `just screenshots` runs the hardware test with them on.
+
 - `examples/hello.rs`, the smallest app: what you type shows on the screen.
 - README: a Getting started section (the toolchain, and the `Cargo.toml`, `.cargo/config.toml` and `rust-toolchain.toml` for an app of your own); it says the crate is for the ADV only, and why; Status is a list of what's tested on hardware and what isn't.
 - `Keyboard::wait_for_inputs` is about 3 kB smaller in flash: one wait for keys or the next repeat, rather than two copies of the keyboard read.

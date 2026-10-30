@@ -23,6 +23,10 @@
 //! one) show too, and everything is logged over USB as well.
 //!
 //! `just hardware`, or `cargo run --release --example hardware --features sd-card`
+//!
+//! Built with `SCREENSHOTS=1` in the environment, it also logs a screenshot
+//! each time it redraws (`just screenshots`; `just gif` makes a GIF of
+//! them). The microphone stops hearing then: logging one stalls sound.
 
 #![no_std]
 #![no_main]
@@ -39,9 +43,9 @@ use core::{
 };
 
 use cardputer_adv::{
-    Acceleration, AccelerometerRange, AudioPins, Button, Click, Decibels, Display, GyroscopeRange,
-    Hertz, Imu, ImuMode, IrTransmitter, Keyboard, Motion, NecCode, Percent, Pulse, Repeat, RgbLed,
-    Rotation, Tone,
+    Acceleration, AccelerometerRange, AudioPins, Button, Click, Decibels, Display, Frame,
+    GyroscopeRange, Hertz, Imu, ImuMode, IrTransmitter, Keyboard, Mirror, Motion, NecCode, Percent,
+    Pulse, Repeat, RgbLed, Rotation, Tone,
     embedded_sdmmc::BlockDevice,
     keys::{KeyInput, Modifier},
 };
@@ -58,9 +62,16 @@ use esp_backtrace as _;
 use esp_hal::{clock::CpuClock, interrupt::Priority, timer::timg::TimerGroup};
 use esp_rtos::embassy::InterruptExecutor;
 use log::{info, warn};
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// Whether to log a screenshot of each redraw: built with `SCREENSHOTS`
+/// set.
+const SCREENSHOTS: bool = option_env!("SCREENSHOTS").is_some();
+
+/// What the screen shows, for its screenshots.
+static FRAME: ConstStaticCell<Frame> = ConstStaticCell::new(Frame::new());
 
 /// The audio task's executor: above the main one, so the main tasks (and
 /// their logging) never starve the streams.
@@ -393,6 +404,7 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
         if presses >= 3 && loudest >= CLAP_PEAK && tilted && both_layers {
             screen.show(11, true, format_args!("All seen. Unplug when done."));
         }
+        screen.screenshot();
         ticker.next().await;
     }
 }
@@ -400,6 +412,8 @@ async fn report(mut screen: Screen, mut imu: Imu) -> ! {
 /// The LCD as rows of text.
 struct Screen {
     display: Display,
+    /// A copy of what it shows, with [`SCREENSHOTS`].
+    frame: Option<&'static mut Frame>,
 }
 
 impl Screen {
@@ -410,7 +424,15 @@ impl Screen {
 
     fn new(mut display: Display) -> Self {
         display.clear(Rgb565::BLACK).expect("LCD");
-        Self { display }
+        let frame = SCREENSHOTS.then(|| FRAME.take());
+        Self { display, frame }
+    }
+
+    /// Logs a screenshot, with [`SCREENSHOTS`].
+    fn screenshot(&self) {
+        if let Some(frame) = &self.frame {
+            info!("{}", frame.screenshot());
+        }
     }
 
     /// Writes row `row`, green once its step is `done`. The row is padded
@@ -426,9 +448,12 @@ impl Screen {
             .background_color(Rgb565::BLACK)
             .build();
         let top_left = Point::new(0, row * Self::ROW_HEIGHT);
-        Text::with_baseline(line.as_str(), top_left, style, Baseline::Top)
-            .draw(&mut self.display)
-            .expect("LCD");
+        let text = Text::with_baseline(line.as_str(), top_left, style, Baseline::Top);
+        match &mut self.frame {
+            Some(frame) => text.draw(&mut Mirror::new(&mut self.display, frame)),
+            None => text.draw(&mut self.display),
+        }
+        .expect("LCD");
     }
 }
 

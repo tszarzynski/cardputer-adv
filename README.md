@@ -4,7 +4,11 @@
 [![crates.io](https://img.shields.io/crates/v/cardputer-adv.svg)](https://crates.io/crates/cardputer-adv)
 [![API docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tszarzynski.github.io/cardputer-adv/)
 
-Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/Cardputer-Adv) (ESP32-S3) on [esp-hal](https://github.com/esp-rs/esp-hal) 1.x: async drivers for its screen, keyboard, motion sensor, speaker, microphone and the rest, each tested on the device.
+Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/Cardputer-Adv) (ESP32-S3) on [esp-hal](https://github.com/esp-rs/esp-hal) 1.x: async drivers for its screen, keyboard, motion sensor, speaker, microphone and the rest, all but the microSD card tested on the device.
+
+![The hardware example on a Cardputer ADV: each part's step turns green as it's seen to work](docs/hardware-test.gif)
+
+<sub>The screen captured from the device with `Frame::screenshot`, on a Cardputer ADV photo © M5Stack.</sub>
 
 It's for the ADV only. The original Cardputer reads its keyboard as a GPIO matrix rather than through a TCA8418, has no motion sensor, and has different audio, so most of this doesn't apply to it.
 
@@ -228,6 +232,31 @@ backlight.set_brightness(Percent::FULL)?;
 
 While the chip sleeps its USB is off (no log, no flashing until it wakes), and the embassy clock stops. The speaker's stream runs dry and restarts on silence by itself.
 
+## Screenshots
+
+`Frame::screenshot()` gives what the screen shows as one line of text, for the app to log over USB however it logs: the pixels as runs of one colour, in base64, and the time. [`tools/screenshots.py`](tools/screenshots.py) (Python's standard library only) finds them in a saved log and writes them out as PNGs, sharp at 3×, each held for as long as it was on the screen; `just gif <log>` makes a GIF of them with [gifski](https://gif.ski). An app that draws straight to the `Display` draws through a `Mirror`, which copies what it draws into a `Frame`.
+
+```rust
+use cardputer_adv::Mirror;
+use embedded_graphics::{
+    mono_font::{MonoTextStyle, ascii::FONT_6X10},
+    text::Text,
+};
+
+// With a framebuffer: after each flush, say.
+display.flush(frame).await?;
+log::info!("{}", frame.screenshot());
+
+// Drawing straight to the screen: through a Mirror, into a Frame kept for it.
+let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+Text::new("Hello", Point::new(0, 10), style)
+    .draw(&mut Mirror::new(&mut lcd, frame))
+    .expect("LCD");
+log::info!("{}", frame.screenshot());
+```
+
+Logging one takes a while (a screen of small text is about 20 kB, which esp-println sends over USB in about 0.1 s), and the app waits for it: animations keep their pace, as they go by the clock, but frames drawn meanwhile aren't seen. esp-println holds interrupts off while it prints, so the speaker's and the microphone's streams stall and restart: screenshots are for the screen, not for sound. `just screenshots` runs the hardware test with them on, and `just gif` turns its log into a GIF.
+
 ## Pins
 
 | Function | GPIO |
@@ -255,6 +284,14 @@ Not yet tested on hardware:
 - The battery reading, against a multimeter.
 
 The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)); the codec sequences and the pins from M5Stack's M5Unified, with [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver. `imu` tries both of the BMI270's addresses, 0x68 then 0x69, as sources disagree on which the ADV uses.
+
+## Built with cardputer-adv
+
+**Backgammon** against the CPU or a friend: the dice are thrown with a shake, the checkers slide, and it sleeps when put down. Link coming soon.
+
+![Backgammon on a Cardputer ADV: the opening roll, a move, and the CPU's double sixes](docs/backgammon.gif)
+
+<sub>The screen captured from the device with `Frame::screenshot`, on a Cardputer ADV photo © M5Stack.</sub>
 
 ## Documentation
 

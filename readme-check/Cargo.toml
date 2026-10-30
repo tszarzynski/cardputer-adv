@@ -21,3 +21,5 @@ cardputer-adv = { path = ".." }
 embedded-graphics = "0.8.2"
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "unstable"] }
 static_cell = "2.1.1"
+# For the screenshots example, which logs them.
+log = "0.4.27"

@@ -5,7 +5,7 @@ default: check test
 # (CI's toolchain action sets it up itself).
 esp := "if [ -f ~/export-esp.sh ]; then . ~/export-esp.sh; fi"
 
-# formatting, and clippy (pedantic and nursery; warnings are errors), with no features and with all of them, and the example; then the README's examples
+# formatting, and clippy (pedantic and nursery; warnings are errors), with no features and with all of them, and the examples; then the README's examples
 check: && readme
     {{esp}} && cargo fmt -- --check && cargo clippy --release -- -D warnings && cargo clippy --release --all-features --example hardware -- -D warnings && cargo clippy --release --example flush -- -D warnings && cargo clippy --release --example hello -- -D warnings
 
@@ -63,3 +63,11 @@ semver:
     cargo semver-checks \
         --baseline-rustdoc "$out/release-target/xtensa-esp32s3-none-elf/doc/cardputer_adv.json" \
         --current-rustdoc "$out/current-target/xtensa-esp32s3-none-elf/doc/cardputer_adv.json"
+
+# the hardware test, logging a screenshot of each redraw to target/screenshots.log; stop it with Ctrl-C, then `just gif`
+screenshots:
+    {{esp}} && SCREENSHOTS=1 cargo build --release --features sd-card --example hardware && espflash flash --monitor --non-interactive --chip esp32s3 target/xtensa-esp32s3-none-elf/release/examples/hardware | tee target/screenshots.log
+
+# a GIF of the screenshots in a log (tools/screenshots.py, then gifski)
+gif log="target/screenshots.log" out="target/screenshots.gif" fps="20":
+    rm -rf target/screenshots && python3 tools/screenshots.py {{log}} target/screenshots --fps {{fps}} && gifski --quiet --fps {{fps}} -o {{out}} target/screenshots/frame-*.png && ls -lh {{out}}

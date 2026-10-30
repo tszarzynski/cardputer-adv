@@ -103,6 +103,7 @@ mod pins;
 mod pulses;
 mod remote;
 mod repeat;
+mod screenshot;
 #[cfg(feature = "sd-card")]
 mod sd_card;
 mod speaker;
@@ -136,6 +137,7 @@ pub use panel::{HEIGHT, WIDTH};
 pub use pulses::{ExtendedNecCode, NecCode, Pulse};
 pub use remote::{RMT_FREQUENCY, rmt};
 pub use repeat::Repeat;
+pub use screenshot::{Mirror, SCREENSHOT_MARKER, Screenshot};
 #[cfg(feature = "sd-card")]
 pub use sd_card::{SdCard, SdCardPins, sd_card};
 pub use speaker::{Speaker, SpeakerPins, speaker};
