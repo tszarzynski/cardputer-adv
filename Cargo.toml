@@ -1,6 +1,6 @@
 [package]
 name = "cardputer-adv"
-version = "0.4.3"
+version = "0.4.4"
 description = "Board support for the M5Stack Cardputer ADV (ESP32-S3) on esp-hal: display, keyboard, motion sensor, speaker, microphone, RGB LED, IR, microSD, backlight and battery"
 edition = "2024"
 rust-version = "1.95"
