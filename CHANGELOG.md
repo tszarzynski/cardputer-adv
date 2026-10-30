@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-30
+
 - README: GIFs of the hardware example and of backgammon, made with screenshots from the device, and a Built with cardputer-adv section.
 - Screenshots: `Frame::screenshot()` gives what the screen shows as one line of text (`Screenshot`, starting `SCREENSHOT_MARKER`) for the app to log (sound stalls meanwhile: esp-println holds interrupts off while it prints), and `Mirror` copies drawing straight to the `Display` into a `Frame`, for apps without one. `tools/screenshots.py` turns a log of them into PNGs, and `just gif` into a GIF; `just screenshots` runs the hardware test with them on.
 
