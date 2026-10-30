@@ -7,7 +7,7 @@ esp := "if [ -f ~/export-esp.sh ]; then . ~/export-esp.sh; fi"
 
 # formatting, and clippy (pedantic and nursery; warnings are errors), with no features and with all of them, and the example; then the README's examples
 check: && readme
-    {{esp}} && cargo fmt -- --check && cargo clippy --release -- -D warnings && cargo clippy --release --all-features --example hardware -- -D warnings && cargo clippy --release --example flush -- -D warnings
+    {{esp}} && cargo fmt -- --check && cargo clippy --release -- -D warnings && cargo clippy --release --all-features --example hardware -- -D warnings && cargo clippy --release --example flush -- -D warnings && cargo clippy --release --example hello -- -D warnings
 
 # the README's examples and the crate docs' quick start, compiled (readme-check/ takes them out of their files), with fmt and clippy on its own code
 readme:
@@ -21,9 +21,9 @@ test:
 fix:
     cargo fmt
 
-# build the crate, the hardware test and the flush timing
+# build the crate, the hardware test, the flush timing and the hello example
 build:
-    {{esp}} && cargo build --release && cargo build --release --all-features --example hardware && cargo build --release --example flush
+    {{esp}} && cargo build --release && cargo build --release --all-features --example hardware && cargo build --release --example flush && cargo build --release --example hello
 
 # try each part on a Cardputer and follow its log (examples/hardware.rs says what to look for)
 hardware:

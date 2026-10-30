@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- `examples/hello.rs`, the smallest app: what you type shows on the screen.
+- README: a Getting started section (the toolchain, and the `Cargo.toml`, `.cargo/config.toml` and `rust-toolchain.toml` for an app of your own); it says the crate is for the ADV only, and why; Status is a list of what's tested on hardware and what isn't.
+- `Keyboard::wait_for_inputs` is about 3 kB smaller in flash: one wait for keys or the next repeat, rather than two copies of the keyboard read.
+
 ## [0.4.2] - 2026-10-29
 
 - Key auto-repeat: `Keyboard::set_repeat(Some(Repeat::default()))` repeats a held key in `wait_for_inputs`, after 400 ms and then 20 times a second (`Repeat::new` for other timings). Off by default.

@@ -4,7 +4,65 @@
 [![crates.io](https://img.shields.io/crates/v/cardputer-adv.svg)](https://crates.io/crates/cardputer-adv)
 [![API docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tszarzynski.github.io/cardputer-adv/)
 
-Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/Cardputer-Adv) (ESP32-S3) on [esp-hal](https://github.com/esp-rs/esp-hal) 1.x.
+Board support for the [M5Stack Cardputer ADV](https://docs.m5stack.com/en/core/Cardputer-Adv) (ESP32-S3) on [esp-hal](https://github.com/esp-rs/esp-hal) 1.x: async drivers for its screen, keyboard, motion sensor, speaker, microphone and the rest, each tested on the device.
+
+It's for the ADV only. The original Cardputer reads its keyboard as a GPIO matrix rather than through a TCA8418, has no motion sensor, and has different audio, so most of this doesn't apply to it.
+
+## Getting started
+
+Install Rust's Xtensa toolchain and the flasher, then try the smallest example, [`examples/hello.rs`](examples/hello.rs), which shows what you type:
+
+```sh
+cargo install espup espflash
+espup install && . ~/export-esp.sh
+git clone https://github.com/tszarzynski/cardputer-adv && cd cardputer-adv
+cargo run --release --example hello   # with the Cardputer on USB
+```
+
+For an app of your own, copy `hello.rs` to `src/main.rs`, with this `Cargo.toml`:
+
+```toml
+[package]
+name = "my-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cardputer-adv = "0.4"
+embassy-executor = "0.10"
+embedded-graphics = "0.8"
+esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
+esp-hal = { version = "1.2", features = ["esp32s3", "unstable"] }
+esp-println = { version = "0.18", features = ["esp32s3"] }
+esp-rtos = { version = "0.4", features = ["embassy", "esp32s3"] }
+
+[profile.release]
+debug = 2
+```
+
+and `.cargo/config.toml`, so `cargo run --release` builds for the ESP32-S3 and flashes it:
+
+```toml
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor --chip esp32s3"
+rustflags = ["-C", "link-arg=-nostartfiles", "-C", "link-arg=-Tlinkall.x", "-C", "link-arg=-Wl,--no-warn-rwx-segments"]
+
+[unstable]
+build-std = ["core"]
+```
+
+and `rust-toolchain.toml`, for the Xtensa toolchain:
+
+```toml
+[toolchain]
+channel = "esp"
+```
+
+[`examples/hardware.rs`](examples/hardware.rs) uses every part, if you want to see one in a full program.
 
 ## Hardware
 
@@ -189,7 +247,14 @@ The I2C bus is async, shared through an async mutex (embassy-sync's, with embass
 
 ## Status
 
-The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)). The display and the keyboard, including its interrupt line, work on a Cardputer ADV (tested October 2026). So do the motion sensor and the speaker. `imu` tries the BMI270's two addresses, 0x68 then 0x69, because sources disagree on which one the ADV uses (espp says 0x68, oxstack 0x69). The ES8311 sequence is M5Unified's Cardputer ADV speaker enable, as [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver uses it. The battery reading is new and not yet checked against a multimeter. The pins for the microphone, the microSD card, the IR LED, the RGB LED and G0 are M5Unified's for the ADV, and the microphone's codec sequence is its microphone enable. The microphone, the gyroscope, G0, the RGB LED and IR transmission work on the ADV too (tested October 2026; the IR LED's light itself not yet seen). The microSD card hasn't been tested on hardware yet. `examples/hardware.rs` (`just hardware`) tries each of these parts, showing its steps and readings on the screen.
+Tested on a Cardputer ADV (October 2026): the display, the backlight, the keyboard (with its interrupt line and waking from light sleep), the motion sensor (accelerometer, gyroscope and temperature), the speaker, the microphone, G0, the RGB LED, and IR transmission (as signals; the IR LED's light itself not yet seen). `examples/hardware.rs` (`just hardware`) tries each part and shows its readings on the screen.
+
+Not yet tested on hardware:
+
+- The microSD card.
+- The battery reading, against a multimeter.
+
+The display settings (panel offset 52/40, 90° rotation, colour inversion) come from working ADV firmware ([iwan-inc/cardputer-rust](https://github.com/iwan-inc/cardputer-rust)); the codec sequences and the pins from M5Stack's M5Unified, with [espp](https://github.com/esp-cpp/espp/tree/main/components/m5stack-cardputer)'s driver. `imu` tries both of the BMI270's addresses, 0x68 then 0x69, as sources disagree on which the ADV uses.
 
 ## Documentation
 

@@ -61,16 +61,13 @@ impl Keyboard {
         &mut self,
     ) -> Result<impl Iterator<Item = KeyInput> + use<>, Error> {
         loop {
-            let (events, repeated) = match self.repeater.next_at() {
-                Some(at) => {
-                    let at =
-                        Instant::from_micros(u64::try_from(at.as_micros()).unwrap_or(u64::MAX));
-                    match select(self.events(), Timer::at(at)).await {
-                        Either::First(events) => (events?, None),
-                        Either::Second(()) => (no_events(), self.repeater.due(now())),
-                    }
-                }
-                None => (self.events().await?, None),
+            // With no key repeating, the timer never fires.
+            let at = self.repeater.next_at().map_or(Instant::MAX, |at| {
+                Instant::from_micros(u64::try_from(at.as_micros()).unwrap_or(u64::MAX))
+            });
+            let (events, repeated) = match select(self.events(), Timer::at(at)).await {
+                Either::First(events) => (events?, None),
+                Either::Second(()) => (no_events(), self.repeater.due(now())),
             };
             let mut inputs = events
                 .filter(|event| event.is_press())
