@@ -126,3 +126,42 @@ macro_rules! sd_card_pins {
         }
     };
 }
+
+/// The whole board's peripherals ([`BoardPins`]) from esp-hal's
+/// `Peripherals`, for [`Board::new`]: all but the microSD card's.
+///
+/// [`BoardPins`]: crate::BoardPins
+/// [`Board::new`]: crate::Board::new
+#[macro_export]
+macro_rules! board_pins {
+    ($peripherals:expr) => {
+        $crate::BoardPins {
+            display: $crate::display_pins!($peripherals),
+            keyboard: $crate::keyboard_pins!($peripherals),
+            audio: $crate::audio_pins!($peripherals),
+            battery: $crate::battery_pins!($peripherals),
+            button: $peripherals.GPIO0,
+            rmt: $peripherals.RMT,
+            led: $peripherals.GPIO21,
+            ir: $peripherals.GPIO44,
+        }
+    };
+}
+
+/// Sets the whole board up from esp-hal's `Peripherals`; await it.
+///
+/// It's [`Board::new`] on [`board_pins!`]. Only the board's fields move, so the
+/// rest of `Peripherals` (the timers, the radio, the Grove port's pins)
+/// stays usable.
+///
+/// ```ignore
+/// let Board { display, keyboard, .. } = cardputer_adv::board!(p).await?;
+/// ```
+///
+/// [`Board::new`]: crate::Board::new
+#[macro_export]
+macro_rules! board {
+    ($peripherals:expr) => {
+        $crate::Board::new($crate::board_pins!($peripherals))
+    };
+}

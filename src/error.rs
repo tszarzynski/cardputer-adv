@@ -38,6 +38,9 @@ pub enum Error {
     Ir,
     /// The microSD card's SPI bus couldn't be set up.
     SdCard,
+    /// A part was asked for settings it can't take together, such as the
+    /// motion sensor's low-power mode above 200 Hz.
+    Unsupported,
 }
 
 impl fmt::Display for Error {
@@ -57,6 +60,7 @@ impl fmt::Display for Error {
             Self::Led => "RGB LED (WS2812) write failed",
             Self::Ir => "IR transmission failed",
             Self::SdCard => "microSD SPI bus setup failed",
+            Self::Unsupported => "settings the part can't take together",
         })
     }
 }

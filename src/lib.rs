@@ -25,25 +25,27 @@
 //! - `sd_card` (with the `sd-card` feature): the microSD card, through
 //!   [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc).
 //!
-//! Each part's pins come out of esp-hal's `Peripherals` with a macro named
-//! after it, [`display_pins!`], [`keyboard_pins!`] and so on; only those
-//! fields move, so the rest stays usable.
+//! [`board!`] sets the whole board up in one call, as a [`Board`]: the
+//! parts with nothing to choose, ready, and the pins of the display and the
+//! audio. Or part by part: each part's pins come out of esp-hal's
+//! `Peripherals` with a macro named after it, [`display_pins!`],
+//! [`keyboard_pins!`] and so on. Either way only those fields move, so the
+//! rest stays usable.
 //!
 //! The async parts need an embassy-time driver, such as esp-rtos's.
 //!
 //! # Quick start
 //!
 //! ```ignore
-//! use cardputer_adv::{display_pins, i2c_pins, speaker_pins};
+//! use cardputer_adv::Board;
 //!
 //! let p = esp_hal::init(esp_hal::Config::default());
 //! // …start esp-rtos (or another embassy-time driver)…
-//! let (mut display, mut backlight) = cardputer_adv::display(display_pins!(p))?;
-//! let bus = cardputer_adv::i2c(i2c_pins!(p))?;
-//! let mut keyboard = cardputer_adv::keyboard_on(bus, p.GPIO11).await?;
+//! let Board { display, mut keyboard, bus, audio, .. } = cardputer_adv::board!(p).await?;
+//! let (mut display, mut backlight) = cardputer_adv::display(display)?;
 //! let mut imu = cardputer_adv::imu(bus).await?;
 //! // In a task of its own: the speaker, then the codec it clocks.
-//! let mut speaker = cardputer_adv::speaker(speaker_pins!(p))?;
+//! let mut speaker = cardputer_adv::speaker(audio.speaker)?;
 //! let mut codec = cardputer_adv::codec(bus).await?;
 //!
 //! for key in keyboard.wait_for_inputs().await? { /* … */ }
@@ -83,6 +85,7 @@
 mod audio;
 mod battery;
 mod bmi270;
+mod board;
 mod button;
 mod codec;
 mod convert;
@@ -113,7 +116,8 @@ mod units;
 
 pub use audio::{Audio, AudioPins, audio};
 pub use battery::{Battery, BatteryPins, battery};
-pub use bmi270::{AccelerometerRange, GyroscopeRange, ImuMode};
+pub use bmi270::{AccelerometerRange, GyroscopeRange, ImuMode, ImuRate};
+pub use board::{Board, BoardPins};
 pub use button::{Button, Click, button};
 pub use codec::{Codec, codec};
 pub use convert::battery_percent;

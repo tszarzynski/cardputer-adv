@@ -10,7 +10,7 @@ use crate::{
     Acceleration, Error, I2cBus, I2cDevice, Millicelsius, Motion, Rotation,
     bmi270::{
         self, ACCELEROMETER_ON, ADVANCED_POWER_SAVE, AccelerometerRange, GYROSCOPE_ON,
-        GyroscopeRange, INITIALISED, ImuMode, SOFT_RESET, UPLOAD_CHUNK, register,
+        GyroscopeRange, INITIALISED, ImuMode, ImuRate, SOFT_RESET, UPLOAD_CHUNK, register,
     },
     convert::{milli_g, millicelsius, millidegrees_per_second},
 };
@@ -27,9 +27,8 @@ const INITIALISATION_TIME: Duration = Duration::from_millis(20);
 const GYROSCOPE_START: Duration = Duration::from_millis(50);
 
 /// How many readings [`Imu::calibrate_gyroscope`] averages, one per
-/// measurement (100 Hz): a third of a second.
+/// measurement: a third of a second at 100 Hz.
 const CALIBRATION_SAMPLES: i32 = 32;
-const SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 /// How long a new range takes to reach the readings. Setting one restarts
 /// the sensor's filter, and the last reading, in the old range, stays for up
 /// to 60 ms (measured on the ADV).
@@ -39,13 +38,15 @@ const RANGE_CHANGE: Duration = Duration::from_millis(80);
 /// [turned on](Self::set_gyroscope).
 ///
 /// Both sample at 100 Hz, in its [power mode](Self::set_mode), at ±8 g
-/// and ±2000 °/s unless [set](Self::set_accelerometer_range)
-/// [otherwise](Self::set_gyroscope_range).
+/// and ±2000 °/s unless [set](Self::set_rate)
+/// [otherwise](Self::set_accelerometer_range)
+/// ([and](Self::set_gyroscope_range)).
 pub struct Imu {
     device: I2cDevice,
     /// Where it answered: 0x68 or 0x69.
     address: u8,
     mode: ImuMode,
+    rate: ImuRate,
     accelerometer_range: AccelerometerRange,
     gyroscope_range: GyroscopeRange,
     /// The gyroscope's raw reading at rest, taken off each reading.
@@ -144,18 +145,52 @@ impl Imu {
     ///
     /// # Errors
     ///
-    /// If the sensor doesn't answer; the mode is then partly set.
+    /// [`Error::Unsupported`] for [`ImuMode::LowPower`] at a
+    /// [rate](Self::set_rate) above 200 Hz, which it can't sample at;
+    /// [`Error::Imu`] if the sensor doesn't answer, and the mode is then
+    /// partly set.
     pub async fn set_mode(&mut self, mode: ImuMode) -> Result<(), Error> {
-        self.write(register::ACC_CONF, mode.acc_conf()).await?;
-        self.write(register::GYR_CONF, mode.gyr_conf()).await?;
-        self.mode = mode;
-        Ok(())
+        self.configure(mode, self.rate).await
     }
 
     /// The power mode the sensors are in.
     #[must_use]
     pub const fn mode(&self) -> ImuMode {
         self.mode
+    }
+
+    /// Sets how often both sensors measure: faster catches quicker
+    /// movements (taps, vibration), and slower draws less in
+    /// [`ImuMode::LowPower`]. [`imu`] starts at 100 Hz.
+    ///
+    /// As after a change of [mode](Self::set_mode), the readings stay as
+    /// they were for a few tens of milliseconds while the sensor's filter
+    /// starts again.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`] above 200 Hz in [`ImuMode::LowPower`], which
+    /// can't sample that fast; [`Error::Imu`] if the sensor doesn't answer,
+    /// and the rate is then partly set.
+    pub async fn set_rate(&mut self, rate: ImuRate) -> Result<(), Error> {
+        self.configure(self.mode, rate).await
+    }
+
+    /// How often the sensors measure.
+    #[must_use]
+    pub const fn rate(&self) -> ImuRate {
+        self.rate
+    }
+
+    /// Writes the sensors' configuration for `mode` at `rate`.
+    async fn configure(&mut self, mode: ImuMode, rate: ImuRate) -> Result<(), Error> {
+        if !mode.supports(rate) {
+            return Err(Error::Unsupported);
+        }
+        self.write(register::ACC_CONF, mode.acc_conf(rate)).await?;
+        self.write(register::GYR_CONF, mode.gyr_conf(rate)).await?;
+        (self.mode, self.rate) = (mode, rate);
+        Ok(())
     }
 
     /// Turns the gyroscope on or off, in the [power mode](Self::set_mode).
@@ -170,7 +205,8 @@ impl Imu {
         if on {
             self.write(register::GYR_RANGE, self.gyroscope_range.register())
                 .await?;
-            self.write(register::GYR_CONF, self.mode.gyr_conf()).await?;
+            self.write(register::GYR_CONF, self.mode.gyr_conf(self.rate))
+                .await?;
         }
         self.set_power(on).await
     }
@@ -209,7 +245,8 @@ impl Imu {
     /// off [`rotation`](Self::rotation)'s readings from then on. Turns the
     /// gyroscope on if it isn't.
     ///
-    /// The Cardputer must lie still meanwhile, about 0.4 s: any turning is
+    /// The Cardputer must lie still meanwhile, about 0.4 s at 100 Hz (32
+    /// readings, so longer at slower [rates](Self::set_rate)): any turning is
     /// taken for offset. The offset drifts with temperature, so calibrate
     /// again if it matters.
     ///
@@ -220,8 +257,11 @@ impl Imu {
         self.set_gyroscope(true).await?;
         Timer::after(GYROSCOPE_START).await;
         let mut sum = [0; 3];
+        let period = Duration::from_micros(
+            u64::try_from(self.rate.period().as_micros()).unwrap_or(u64::MAX),
+        );
         for _ in 0..CALIBRATION_SAMPLES {
-            Timer::after(SAMPLE_PERIOD).await;
+            Timer::after(period).await;
             let raw = self.axes(register::GYR_DATA).await?;
             for (total, value) in sum.iter_mut().zip(raw) {
                 *total += value;
@@ -262,7 +302,8 @@ impl Imu {
         }
         self.write(register::ACC_RANGE, self.accelerometer_range.register())
             .await?;
-        self.write(register::ACC_CONF, self.mode.acc_conf()).await?;
+        self.write(register::ACC_CONF, self.mode.acc_conf(self.rate))
+            .await?;
         self.set_power(false).await
     }
 
@@ -345,6 +386,7 @@ pub async fn imu(bus: &'static I2cBus) -> Result<Imu, Error> {
             device: I2cDevice::new(bus),
             address,
             mode: ImuMode::default(),
+            rate: ImuRate::default(),
             accelerometer_range: AccelerometerRange::default(),
             gyroscope_range: GyroscopeRange::default(),
             gyroscope_offset: [0; 3],
@@ -366,6 +408,7 @@ impl fmt::Debug for Imu {
         f.debug_struct("Imu")
             .field("address", &self.address)
             .field("mode", &self.mode)
+            .field("rate", &self.rate)
             .field("accelerometer_range", &self.accelerometer_range)
             .field("gyroscope_range", &self.gyroscope_range)
             .field("gyroscope_offset", &self.gyroscope_offset)

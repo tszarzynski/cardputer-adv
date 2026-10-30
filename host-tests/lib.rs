@@ -38,7 +38,7 @@ mod tone;
 #[path = "../src/units.rs"]
 mod units;
 
-pub use bmi270::{AccelerometerRange, GyroscopeRange, ImuMode};
+pub use bmi270::{AccelerometerRange, GyroscopeRange, ImuMode, ImuRate};
 pub use frame::Frame;
 pub use keymap::Keymap;
 pub use panel::{HEIGHT, WIDTH};

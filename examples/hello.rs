@@ -15,7 +15,7 @@
     reason = "esp-rtos's main macro passes the spawner on, which nothing here uses"
 )]
 
-use cardputer_adv::{Repeat, WIDTH, keys::KeyInput};
+use cardputer_adv::{Board, Repeat, WIDTH, keys::KeyInput};
 use embassy_executor::Spawner;
 use embedded_graphics::{
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
@@ -37,11 +37,14 @@ async fn main(_spawner: Spawner) -> ! {
     let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     esp_rtos::start(TimerGroup::new(p.TIMG0).timer0, p.FROM_CPU_INTR0);
 
-    let (mut display, _backlight) =
-        cardputer_adv::display(cardputer_adv::display_pins!(p)).expect("display");
-    let mut keyboard = cardputer_adv::keyboard(cardputer_adv::keyboard_pins!(p))
-        .await
-        .expect("keyboard");
+    // The parts with nothing to choose, set up. The display draws straight
+    // to the screen here; frame_display would draw from a framebuffer.
+    let Board {
+        display,
+        mut keyboard,
+        ..
+    } = cardputer_adv::board!(p).await.expect("board");
+    let (mut display, _backlight) = cardputer_adv::display(display).expect("display");
     keyboard.set_repeat(Some(Repeat::default()));
 
     let style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);

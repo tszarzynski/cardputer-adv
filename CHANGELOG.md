@@ -6,6 +6,9 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- `board!(p).await` sets the whole board up in one call (`Board`, from `BoardPins` and `board_pins!`): the I2C bus, the keyboard, G0, the battery, and the RMT with the RGB LED and the IR transmitter. It hands over the display's and the audio's pins, which need a choice, and leaves the motion sensor to `imu(bus)`. Only the board's fields of `Peripherals` move. The hello example and the README's first example use it.
+- `Imu::set_rate` (`ImuRate`, 25 to 1600 Hz) and `Imu::rate`: how often both sensors measure. Low-power mode goes up to 200 Hz (asked for 400, the sensor gave 200, so it's refused); more, by rate or by mode, is the new `Error::Unsupported`. Calibrating the gyroscope takes its 32 readings at the rate.
+
 ## [0.4.3] - 2026-10-30
 
 - README: GIFs of the hardware example and of backgammon, made with screenshots from the device, and a Built with cardputer-adv section.

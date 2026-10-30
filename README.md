@@ -76,8 +76,8 @@ What the Cardputer ADV has, and what this crate covers so far.
 |---|---|---|
 | LCD, 1.14" ST7789V2, 240×135 | ✅ drawing directly, or a framebuffer sent by DMA; the controller's sleep | `display`, `frame_display`, `Frame`, `FrameDisplay::flush`, `FrameDisplay::set_asleep` |
 | Backlight (GPIO38) | ✅ dimmable, 0–100% | `Backlight::set_brightness` |
-| Keyboard, 56 keys (TCA8418) | ✅ Shift and Fn layers, presses and releases, auto-repeat, interrupt-driven, wakes the chip from light sleep | `keyboard`, `keyboard_on`, `Keyboard::wait_for_inputs`, `Keyboard::wait_for_events`, `Keyboard::is_held`, `Keyboard::set_repeat`, `Keyboard::listen_for_wake` |
-| Motion sensor (BMI270) | ✅ accelerometer, ±2 to ±16 g at 100 Hz; gyroscope, ±125 to ±2000 °/s at 100 Hz; low-power, normal and performance modes; temperature; ❌ motion interrupts (its INT pins don't reach the ESP32) | `imu`, `Imu::acceleration`, `Imu::set_gyroscope`, `Imu::calibrate_gyroscope`, `Imu::rotation`, `Imu::motion`, `Imu::set_mode`, `Imu::set_accelerometer_range`, `Imu::set_gyroscope_range`, `Imu::temperature` |
+| Keyboard, 56 keys (TCA8418) | ✅ Shift and Fn layers, presses and releases, auto-repeat, interrupt-driven, wakes the chip from light sleep | `board!`, `keyboard`, `keyboard_on`, `Keyboard::wait_for_inputs`, `Keyboard::wait_for_events`, `Keyboard::is_held`, `Keyboard::set_repeat`, `Keyboard::listen_for_wake` |
+| Motion sensor (BMI270) | ✅ accelerometer, ±2 to ±16 g; gyroscope, ±125 to ±2000 °/s; both at 25 to 1600 Hz; low-power, normal and performance modes; temperature; ❌ motion interrupts (its INT pins don't reach the ESP32) | `imu`, `Imu::acceleration`, `Imu::set_gyroscope`, `Imu::calibrate_gyroscope`, `Imu::rotation`, `Imu::motion`, `Imu::set_mode`, `Imu::set_accelerometer_range`, `Imu::set_gyroscope_range`, `Imu::set_rate`, `Imu::temperature` |
 | Speaker (ES8311 codec, NS4150B amplifier) | ✅ playing samples at 44.1 kHz, tones, volume, output off for sleep | `speaker`, `Speaker::run`, `Tone`, `codec`, `Codec` |
 | Microphone (through the ES8311, I2S in on GPIO46) | ✅ recording at 44.1 kHz, alongside the speaker; preamp gain | `audio`, `Audio::run`, `Codec::set_microphone`, `Codec::set_microphone_gain` |
 | Battery (GPIO10) | ✅ voltage and estimated charge; charging can't be detected (no line for it) | `battery`, `Battery::voltage`, `Battery::percent` |
@@ -118,27 +118,30 @@ What the Cardputer ADV has, and what this crate covers so far.
 - `Imu::motion().await` reads the acceleration and the rotation rate together (`Motion { acceleration, rotation }`), in one transfer: both of the same moment, for combining them, and half the bus traffic of reading them apart.
 - `Imu::temperature().await` reads the BMI270's temperature (`Millicelsius`, shown as `27.4 °C`): the board's, a few degrees above the room's while it runs. It's measured every 1.28 s.
 - `Imu::set_accelerometer_range(AccelerometerRange).await` (±2, 4, 8 or 16 g) and `Imu::set_gyroscope_range(GyroscopeRange).await` (±125, 250, 500, 1000 or 2000 °/s): a narrower range reads small movements more finely and clips big ones. Readings stay in milli-g and milli-degrees a second, and a gyroscope calibration carries over. Each takes 80 ms: the sensor holds its last reading, in the old range, for up to 60 ms after a change.
+- `Imu::set_rate(ImuRate).await` sets how often both sensors measure, from 25 to 1600 Hz (100 Hz to start): faster catches taps and vibration, and slower draws less in `ImuMode::LowPower`, where the current follows the rate. Low power averages 4 samples a reading, so it goes up to 200 Hz (asked for 400, the sensor gives 200); asking for more, by rate or by mode, is `Error::Unsupported`. As after a change of mode, the readings stay as they were for a few tens of milliseconds while the sensor's filter starts again.
 - `rmt(RMT)` sets up the RMT peripheral for the RGB LED and the IR transmitter; give each one of its transmit channels. `rgb_led(channel, GPIO21)` returns an `RgbLed`, and `RgbLed::set_color(Rgb888).await` sets it (black is off). It's powered through the backlight's switch, so it's lit only while the backlight is, and dims with it.
 - `ir_transmitter(channel, GPIO44)` returns an `IrTransmitter`, which sends on a 38 kHz carrier. NEC codes: `send_nec(NecCode { address, command })`, `send_nec_extended(ExtendedNecCode { … })` for a 16-bit address, and `send_nec_repeat` for a held button. Any other protocol's (Sony, RC5, Samsung, an air conditioner's), or timings recorded from a remote: `send_raw(&[Pulse { mark_us, space_us }, …])`, each the carrier on for `mark_us` µs and then off for `space_us` µs, up to `IrTransmitter::MAX_PULSES` (128) pulses.
 - `button(GPIO0)` returns the G0 `Button`: `is_pressed()`, `wait_for_press().await` and `wait_for_release().await` (debounced), and `listen_for_wake()` to wake the chip from light sleep, as `Keyboard::listen_for_wake` does.
   - `wait_for_click().await` tells a press apart, giving the one button three jobs: `Click::Single`, `Click::Double` (two presses within 300 ms), or `Click::Long` (held for half a second, told while it's still held). A single click is told 300 ms after its release, once no second press has come.
 - `sd_card(SdCardPins)`, with the `sd-card` feature, sets up the microSD card's own SPI bus (SPI3) and returns an `SdCard`, an [embedded-sdmmc](https://crates.io/crates/embedded-sdmmc) `BlockDevice`. Read and write FAT files through `embedded_sdmmc::VolumeManager`; the crate re-exports `embedded_sdmmc`, so the versions match. The card is started on first use (at 400 kHz, then run at 20 MHz), and again after a failed access, so it can be inserted or swapped while the app runs. It's blocking, so a long read holds up its executor.
+- `board!(p).await` sets the whole board up in one call, as a `Board`: the I2C bus, the keyboard, G0, the battery, and the RMT with the RGB LED and the IR transmitter, ready to use. The display and the audio need a choice (drawing straight to the screen or from a framebuffer; the speaker alone or with the microphone), so it hands over their pins; and it leaves the motion sensor to `imu(bus)`, as it takes 230 ms and draws current. Only the board's fields of `p` move, so the timers and the radio stay usable, and so do the per-part functions below, for full control.
 - Each part's pins come out of esp-hal's `Peripherals` with a macro named after it: `display_pins!(p)`, `i2c_pins!(p)`, `keyboard_pins!(p)`, `speaker_pins!(p)`, `audio_pins!(p)`, `battery_pins!(p)` and `sd_card_pins!(p)`. Only those fields move, so the rest of `p` stays usable. The `…Pins` structs can still be written out by hand.
 - `battery(BatteryPins)` measures the battery voltage (`Battery::voltage()`, in `Millivolts`) on GPIO10 through the board's 2:1 divider, as M5Stack's M5Unified does, and `Battery::percent()` the charge left (a `Percent`), by M5Unified's estimate (3.30 V empty, 4.10 V full). The board can't tell whether it's charging: on USB with the power switch on, it reads the charging voltage.
 
 ```rust
-use cardputer_adv::{display_pins, keyboard_pins};
+use cardputer_adv::Board;
 use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
 
-let (mut display, mut backlight) = cardputer_adv::display(display_pins!(p))?;
-let mut keyboard = cardputer_adv::keyboard(keyboard_pins!(p)).await?;
+let Board { display, mut keyboard, bus, .. } = cardputer_adv::board!(p).await?;
+let (mut display, mut backlight) = cardputer_adv::display(display)?;
+let mut imu = cardputer_adv::imu(bus).await?; // if it's wanted
 display.clear(Rgb565::BLACK).expect("LCD"); // mipidsi's own error type
 loop {
     for key in keyboard.wait_for_inputs().await? { /* … */ }
 }
 ```
 
-With the motion sensor and the speaker, set the shared bus up first:
+Part by part, with the motion sensor and the speaker: set the shared bus up first.
 
 ```rust
 use cardputer_adv::{Acceleration, Percent, i2c_pins, speaker_pins};

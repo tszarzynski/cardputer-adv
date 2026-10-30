@@ -3,6 +3,10 @@
 //! readings' layout. The sequence is the datasheet's, as the
 //! [bmi2](https://crates.io/crates/bmi2) crate follows it.
 
+use core::time::Duration;
+
+use crate::units::Hertz;
+
 /// What its `CHIP_ID` register reads.
 pub const CHIP_ID: u8 = 0x24;
 
@@ -137,9 +141,9 @@ impl GyroscopeRange {
     }
 }
 
-/// `ACC_CONF` and `GYR_CONF`: 100 Hz, and their bandwidth field at 2: the
-/// normal filter, or in low-power mode, averaging 4 samples.
-const CONF_100HZ: u8 = 0x08 | 0x02 << 4;
+/// `ACC_CONF` and `GYR_CONF`: their bandwidth field at 2, the normal
+/// filter, or in low-power mode, averaging 4 samples.
+const BANDWIDTH: u8 = 0x02 << 4;
 /// `ACC_CONF` and `GYR_CONF`: the filter for continuous sampling, not the
 /// low-power duty cycle.
 const FILTER_PERF: u8 = 1 << 7;
@@ -170,20 +174,96 @@ pub enum ImuMode {
 }
 
 impl ImuMode {
-    /// `ACC_CONF` in this mode.
-    pub(crate) const fn acc_conf(self) -> u8 {
+    /// Whether the sensor can sample at `rate` in this mode: in low power,
+    /// each reading averages 4 samples, which caps it at 200 Hz (asked for
+    /// 400, it gave 200, measured on the ADV).
+    pub(crate) const fn supports(self, rate: ImuRate) -> bool {
+        !matches!(self, Self::LowPower) || rate.hertz().0 <= 200
+    }
+
+    /// `ACC_CONF` in this mode, at `rate`.
+    pub(crate) const fn acc_conf(self, rate: ImuRate) -> u8 {
+        let conf = rate.odr() | BANDWIDTH;
         match self {
-            Self::LowPower => CONF_100HZ,
-            Self::Normal | Self::Performance => CONF_100HZ | FILTER_PERF,
+            Self::LowPower => conf,
+            Self::Normal | Self::Performance => conf | FILTER_PERF,
         }
     }
 
-    /// `GYR_CONF` in this mode.
-    pub(crate) const fn gyr_conf(self) -> u8 {
+    /// `GYR_CONF` in this mode, at `rate`.
+    pub(crate) const fn gyr_conf(self, rate: ImuRate) -> u8 {
+        let conf = rate.odr() | BANDWIDTH;
         match self {
-            Self::LowPower => CONF_100HZ,
-            Self::Normal => CONF_100HZ | FILTER_PERF,
-            Self::Performance => CONF_100HZ | FILTER_PERF | NOISE_PERF,
+            Self::LowPower => conf,
+            Self::Normal => conf | FILTER_PERF,
+            Self::Performance => conf | FILTER_PERF | NOISE_PERF,
+        }
+    }
+}
+
+/// How often the motion sensor measures, for [`Imu::set_rate`].
+///
+/// The accelerometer and the gyroscope together. Faster catches quicker
+/// movements (taps, vibration); slower draws less in
+/// [`ImuMode::LowPower`], where the current follows the rate, and which
+/// goes up to 200 Hz.
+///
+/// [`Imu::set_rate`]: crate::Imu::set_rate
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum ImuRate {
+    /// 25 Hz.
+    Hz25,
+    /// 50 Hz.
+    Hz50,
+    /// 100 Hz, what [`imu`] starts at.
+    ///
+    /// [`imu`]: crate::imu
+    #[default]
+    Hz100,
+    /// 200 Hz.
+    Hz200,
+    /// 400 Hz.
+    Hz400,
+    /// 800 Hz.
+    Hz800,
+    /// 1600 Hz, the accelerometer's fastest.
+    Hz1600,
+}
+
+impl ImuRate {
+    /// The rate, in hertz.
+    #[must_use]
+    pub const fn hertz(self) -> Hertz {
+        Hertz(match self {
+            Self::Hz25 => 25,
+            Self::Hz50 => 50,
+            Self::Hz100 => 100,
+            Self::Hz200 => 200,
+            Self::Hz400 => 400,
+            Self::Hz800 => 800,
+            Self::Hz1600 => 1600,
+        })
+    }
+
+    /// The time between readings.
+    #[must_use]
+    pub const fn period(self) -> Duration {
+        Duration::from_micros(1_000_000 / self.hertz().0 as u64)
+    }
+
+    /// The `ACC_CONF` and `GYR_CONF` rate field: 25 Hz is 6, and each step
+    /// up doubles it.
+    const fn odr(self) -> u8 {
+        match self {
+            Self::Hz25 => 0x06,
+            Self::Hz50 => 0x07,
+            Self::Hz100 => 0x08,
+            Self::Hz200 => 0x09,
+            Self::Hz400 => 0x0A,
+            Self::Hz800 => 0x0B,
+            Self::Hz1600 => 0x0C,
         }
     }
 }
@@ -246,15 +326,34 @@ mod tests {
 
     #[test]
     fn the_settings_are_the_datasheets() {
-        // Its examples: normal power mode, ACC_CONF 0xA8; performance mode,
-        // GYR_CONF 0xE8.
-        assert_eq!(ImuMode::Performance.acc_conf(), 0xA8);
-        assert_eq!(ImuMode::Performance.gyr_conf(), 0xE8);
-        assert_eq!(ImuMode::Normal.acc_conf(), 0xA8);
-        assert_eq!(ImuMode::Normal.gyr_conf(), 0xA8);
-        // Low power: no performance bits, 100 Hz, averaging 4.
-        assert_eq!(ImuMode::LowPower.acc_conf(), 0x28);
-        assert_eq!(ImuMode::LowPower.gyr_conf(), 0x28);
+        // Its examples, at 100 Hz: normal power mode, ACC_CONF 0xA8;
+        // performance mode, GYR_CONF 0xE8.
+        let rate = ImuRate::Hz100;
+        assert_eq!(ImuMode::Performance.acc_conf(rate), 0xA8);
+        assert_eq!(ImuMode::Performance.gyr_conf(rate), 0xE8);
+        assert_eq!(ImuMode::Normal.acc_conf(rate), 0xA8);
+        assert_eq!(ImuMode::Normal.gyr_conf(rate), 0xA8);
+        // Low power: no performance bits, averaging 4.
+        assert_eq!(ImuMode::LowPower.acc_conf(rate), 0x28);
+        assert_eq!(ImuMode::LowPower.gyr_conf(rate), 0x28);
+    }
+
+    #[test]
+    fn the_rates_are_the_datasheets() {
+        // 25 Hz is 0x06, 1600 Hz 0x0C, as the rate field takes them.
+        assert_eq!(ImuMode::Normal.acc_conf(ImuRate::Hz25), 0xA6);
+        assert_eq!(ImuMode::Performance.gyr_conf(ImuRate::Hz1600), 0xEC);
+        assert_eq!(ImuMode::LowPower.acc_conf(ImuRate::Hz200), 0x29);
+        assert_eq!(ImuRate::Hz200.period(), Duration::from_millis(5));
+        assert_eq!(ImuRate::Hz1600.hertz(), Hertz(1600));
+    }
+
+    #[test]
+    fn low_power_goes_up_to_200_hz() {
+        assert!(ImuMode::LowPower.supports(ImuRate::Hz200));
+        assert!(!ImuMode::LowPower.supports(ImuRate::Hz400));
+        assert!(!ImuMode::LowPower.supports(ImuRate::Hz800));
+        assert!(ImuMode::Normal.supports(ImuRate::Hz1600));
     }
 
     #[test]
